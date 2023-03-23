@@ -1,0 +1,2869 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="694" onload="init(evt)" viewBox="0 0 1200 694" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="694.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="677" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="677" > </text>
+<g id="frames">
+<g >
+<title>java/math/MutableBigInteger.getBlock (11 samples, 0.05%)</title><rect x="1180.2" y="261" width="0.6" height="15.0" fill="rgb(246,16,47)" rx="2" ry="2" />
+<text  x="1183.23" y="271.5" ></text>
+</g>
+<g >
+<title>java/lang/String.&lt;init&gt; (8 samples, 0.04%)</title><rect x="691.6" y="309" width="0.4" height="15.0" fill="rgb(231,145,51)" rx="2" ry="2" />
+<text  x="694.57" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/RawJwt.getExpiration (3 samples, 0.01%)</title><rect x="714.0" y="325" width="0.2" height="15.0" fill="rgb(251,158,39)" rx="2" ry="2" />
+<text  x="717.00" y="335.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JsonUtil.parseJson (27 samples, 0.12%)</title><rect x="715.4" y="325" width="1.5" height="15.0" fill="rgb(218,158,49)" rx="2" ry="2" />
+<text  x="718.41" y="335.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.addDisjoint (9 samples, 0.04%)</title><rect x="938.2" y="245" width="0.5" height="15.0" fill="rgb(222,0,10)" rx="2" ry="2" />
+<text  x="941.17" y="255.5" ></text>
+</g>
+<g >
+<title>OptoRuntime::new_array_C(Klass*, int, JavaThread*) (2 samples, 0.01%)</title><rect x="935.5" y="245" width="0.2" height="15.0" fill="rgb(235,19,5)" rx="2" ry="2" />
+<text  x="938.55" y="255.5" ></text>
+</g>
+<g >
+<title>OptoRuntime::handle_exception_C_helper(JavaThread*, nmethod*&amp;) (16 samples, 0.07%)</title><rect x="763.6" y="261" width="0.9" height="15.0" fill="rgb(238,6,19)" rx="2" ry="2" />
+<text  x="766.59" y="271.5" ></text>
+</g>
+<g >
+<title>montgomerySquare (11,411 samples, 52.76%)</title><rect x="55.6" y="613" width="622.5" height="15.0" fill="rgb(244,200,11)" rx="2" ry="2" />
+<text  x="58.55" y="623.5" >montgomerySquare</text>
+</g>
+<g >
+<title>Monitor::lock_without_safepoint_check() (3 samples, 0.01%)</title><rect x="1168.9" y="85" width="0.2" height="15.0" fill="rgb(210,194,28)" rx="2" ry="2" />
+<text  x="1171.94" y="95.5" ></text>
+</g>
+<g >
+<title>VMThread::evaluate_operation(VM_Operation*) (5 samples, 0.02%)</title><rect x="1188.7" y="533" width="0.3" height="15.0" fill="rgb(246,44,2)" rx="2" ry="2" />
+<text  x="1191.75" y="543.5" ></text>
+</g>
+<g >
+<title>java/lang/StringCoding.encodeUTF8 (79 samples, 0.37%)</title><rect x="699.9" y="245" width="4.3" height="15.0" fill="rgb(230,52,6)" rx="2" ry="2" />
+<text  x="702.92" y="255.5" ></text>
+</g>
+<g >
+<title>CodeCache::find_blob(void*) (2 samples, 0.01%)</title><rect x="10.1" y="565" width="0.1" height="15.0" fill="rgb(232,154,31)" rx="2" ry="2" />
+<text  x="13.11" y="575.5" ></text>
+</g>
+<g >
+<title>GangWorker::loop() (65 samples, 0.30%)</title><rect x="1183.8" y="565" width="3.6" height="15.0" fill="rgb(208,9,50)" rx="2" ry="2" />
+<text  x="1186.84" y="575.5" ></text>
+</g>
+<g >
+<title>java/security/MessageDigest$Delegate.engineUpdate (162 samples, 0.75%)</title><rect x="750.3" y="293" width="8.8" height="15.0" fill="rgb(222,31,27)" rx="2" ry="2" />
+<text  x="753.28" y="303.5" ></text>
+</g>
+<g >
+<title>jbyte_disjoint_arraycopy (3 samples, 0.01%)</title><rect x="750.7" y="261" width="0.1" height="15.0" fill="rgb(213,45,2)" rx="2" ry="2" />
+<text  x="753.66" y="271.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/RawJwt.&lt;init&gt; (50 samples, 0.23%)</title><rect x="715.4" y="341" width="2.7" height="15.0" fill="rgb(254,86,44)" rx="2" ry="2" />
+<text  x="718.41" y="351.5" ></text>
+</g>
+<g >
+<title>java/nio/charset/CharsetDecoder.decode (7 samples, 0.03%)</title><rect x="691.0" y="293" width="0.4" height="15.0" fill="rgb(245,142,23)" rx="2" ry="2" />
+<text  x="693.97" y="303.5" ></text>
+</g>
+<g >
+<title>SafepointMechanism::block_if_requested_slow(JavaThread*) (4 samples, 0.02%)</title><rect x="773.3" y="261" width="0.2" height="15.0" fill="rgb(225,174,26)" rx="2" ry="2" />
+<text  x="776.30" y="271.5" ></text>
+</g>
+<g >
+<title>zero_blocks (4 samples, 0.02%)</title><rect x="1180.6" y="229" width="0.2" height="15.0" fill="rgb(220,150,2)" rx="2" ry="2" />
+<text  x="1183.62" y="239.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.compareShifted (3 samples, 0.01%)</title><rect x="960.2" y="229" width="0.2" height="15.0" fill="rgb(250,49,14)" rx="2" ry="2" />
+<text  x="963.21" y="239.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.validateASCII (23 samples, 0.11%)</title><rect x="704.8" y="341" width="1.3" height="15.0" fill="rgb(230,224,16)" rx="2" ry="2" />
+<text  x="707.83" y="351.5" ></text>
+</g>
+<g >
+<title>com/google/gson/JsonObject.has (3 samples, 0.01%)</title><rect x="717.2" y="309" width="0.1" height="15.0" fill="rgb(249,159,23)" rx="2" ry="2" />
+<text  x="720.16" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/bind/TypeAdapters$27.read (12 samples, 0.06%)</title><rect x="680.7" y="309" width="0.6" height="15.0" fill="rgb(234,120,12)" rx="2" ry="2" />
+<text  x="683.66" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.strictUrlSafeDecode (235 samples, 1.09%)</title><rect x="692.0" y="325" width="12.8" height="15.0" fill="rgb(253,225,10)" rx="2" ry="2" />
+<text  x="695.01" y="335.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.multiply (300 samples, 1.39%)</title><rect x="938.7" y="213" width="16.4" height="15.0" fill="rgb(217,173,29)" rx="2" ry="2" />
+<text  x="941.71" y="223.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/RawJwt.validateStringClaim (2 samples, 0.01%)</title><rect x="678.2" y="341" width="0.1" height="15.0" fill="rgb(216,40,22)" rx="2" ry="2" />
+<text  x="681.21" y="351.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/SHA2.implCompress0 (78 samples, 0.36%)</title><rect x="746.0" y="213" width="4.2" height="15.0" fill="rgb(236,215,25)" rx="2" ry="2" />
+<text  x="748.97" y="223.5" ></text>
+</g>
+<g >
+<title>com/google/gson/JsonObject.get (5 samples, 0.02%)</title><rect x="716.9" y="309" width="0.3" height="15.0" fill="rgb(221,166,47)" rx="2" ry="2" />
+<text  x="719.89" y="319.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.divideMagnitude (3,891 samples, 17.99%)</title><rect x="960.9" y="181" width="212.2" height="15.0" fill="rgb(240,8,8)" rx="2" ry="2" />
+<text  x="963.86" y="191.5" >java/math/MutableBigInteger..</text>
+</g>
+<g >
+<title>jint_disjoint_arraycopy (3 samples, 0.01%)</title><rect x="1180.5" y="229" width="0.1" height="15.0" fill="rgb(206,139,26)" rx="2" ry="2" />
+<text  x="1183.45" y="239.5" ></text>
+</g>
+<g >
+<title>jdk/internal/reflect/Reflection.getCallerClass (4 samples, 0.02%)</title><rect x="720.8" y="165" width="0.2" height="15.0" fill="rgb(229,82,10)" rx="2" ry="2" />
+<text  x="723.76" y="175.5" ></text>
+</g>
+<g >
+<title>java/util/Arrays.fill (2 samples, 0.01%)</title><rect x="745.2" y="197" width="0.1" height="15.0" fill="rgb(230,113,51)" rx="2" ry="2" />
+<text  x="748.20" y="207.5" ></text>
+</g>
+<g >
+<title>frame::sender_for_compiled_frame(RegisterMap*) const (16 samples, 0.07%)</title><rect x="740.8" y="181" width="0.9" height="15.0" fill="rgb(216,93,17)" rx="2" ry="2" />
+<text  x="743.78" y="191.5" ></text>
+</g>
+<g >
+<title>G1YoungRemSetSamplingThread::sleep_before_next_cycle() (3 samples, 0.01%)</title><rect x="1183.7" y="533" width="0.1" height="15.0" fill="rgb(230,22,5)" rx="2" ry="2" />
+<text  x="1186.67" y="543.5" ></text>
+</g>
+<g >
+<title>CompileQueue::get() (2 samples, 0.01%)</title><rect x="1188.3" y="517" width="0.1" height="15.0" fill="rgb(208,50,23)" rx="2" ry="2" />
+<text  x="1191.25" y="527.5" ></text>
+</g>
+<g >
+<title>CollectedHeap::array_allocate(Klass*, int, int, bool, Thread*) (36 samples, 0.17%)</title><rect x="735.2" y="149" width="2.0" height="15.0" fill="rgb(226,6,25)" rx="2" ry="2" />
+<text  x="738.22" y="159.5" ></text>
+</g>
+<g >
+<title>VM_G1CollectForAllocation::doit() (5 samples, 0.02%)</title><rect x="1188.7" y="501" width="0.3" height="15.0" fill="rgb(241,32,28)" rx="2" ry="2" />
+<text  x="1191.75" y="511.5" ></text>
+</g>
+<g >
+<title>java/lang/ref/SoftReference.get (2 samples, 0.01%)</title><rect x="719.2" y="117" width="0.1" height="15.0" fill="rgb(242,41,35)" rx="2" ry="2" />
+<text  x="722.18" y="127.5" ></text>
+</g>
+<g >
+<title>MemAllocator::allocate_inside_tlab_slow(MemAllocator::Allocation&amp;) const (2 samples, 0.01%)</title><rect x="935.5" y="181" width="0.2" height="15.0" fill="rgb(248,94,17)" rx="2" ry="2" />
+<text  x="938.55" y="191.5" ></text>
+</g>
+<g >
+<title>org/openjdk/jmh/runner/BaseRunner.runBenchmarksForked (2 samples, 0.01%)</title><rect x="1183.6" y="597" width="0.1" height="15.0" fill="rgb(220,158,12)" rx="2" ry="2" />
+<text  x="1186.56" y="607.5" ></text>
+</g>
+<g >
+<title>java/lang/reflect/AccessibleObject.verifyAccess (24 samples, 0.11%)</title><rect x="719.3" y="149" width="1.4" height="15.0" fill="rgb(207,151,33)" rx="2" ry="2" />
+<text  x="722.34" y="159.5" ></text>
+</g>
+<g >
+<title>os::PlatformEvent::park(long) (5 samples, 0.02%)</title><rect x="1188.4" y="501" width="0.3" height="15.0" fill="rgb(214,33,32)" rx="2" ry="2" />
+<text  x="1191.42" y="511.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/bind/TypeAdapters$27.read (6 samples, 0.03%)</title><rect x="715.6" y="261" width="0.4" height="15.0" fill="rgb(222,64,38)" rx="2" ry="2" />
+<text  x="718.63" y="271.5" ></text>
+</g>
+<g >
+<title>java/lang/StringCoding.decode (9 samples, 0.04%)</title><rect x="685.7" y="293" width="0.5" height="15.0" fill="rgb(230,73,50)" rx="2" ry="2" />
+<text  x="688.68" y="303.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.put (4 samples, 0.02%)</title><rect x="680.7" y="277" width="0.2" height="15.0" fill="rgb(227,68,15)" rx="2" ry="2" />
+<text  x="683.66" y="287.5" ></text>
+</g>
+<g >
+<title>java/lang/String.coder (9 samples, 0.04%)</title><rect x="704.3" y="293" width="0.5" height="15.0" fill="rgb(248,138,13)" rx="2" ry="2" />
+<text  x="707.34" y="303.5" ></text>
+</g>
+<g >
+<title>CodeCache::get_code_heap_containing(void*) (3 samples, 0.01%)</title><rect x="741.1" y="133" width="0.1" height="15.0" fill="rgb(211,109,32)" rx="2" ry="2" />
+<text  x="744.06" y="143.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.divide2n1n (4,441 samples, 20.53%)</title><rect x="937.9" y="261" width="242.3" height="15.0" fill="rgb(242,38,37)" rx="2" ry="2" />
+<text  x="940.95" y="271.5" >java/math/MutableBigInteger.divi..</text>
+</g>
+<g >
+<title>CodeCache::find_blob_unsafe(void*) (4 samples, 0.02%)</title><rect x="739.6" y="149" width="0.3" height="15.0" fill="rgb(213,139,9)" rx="2" ry="2" />
+<text  x="742.64" y="159.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.decode (64 samples, 0.30%)</title><rect x="692.9" y="261" width="3.5" height="15.0" fill="rgb(246,191,28)" rx="2" ry="2" />
+<text  x="695.88" y="271.5" ></text>
+</g>
+<g >
+<title>java/nio/ByteBuffer.wrap (3 samples, 0.01%)</title><rect x="684.7" y="309" width="0.2" height="15.0" fill="rgb(252,10,4)" rx="2" ry="2" />
+<text  x="687.70" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/RsaSsaPssVerifyJce.emsaPssVerify (747 samples, 3.45%)</title><rect x="718.4" y="341" width="40.7" height="15.0" fill="rgb(228,88,45)" rx="2" ry="2" />
+<text  x="721.36" y="351.5" >com..</text>
+</g>
+<g >
+<title>com/google/gson/internal/bind/TypeAdapters$27.read (12 samples, 0.06%)</title><rect x="680.7" y="325" width="0.6" height="15.0" fill="rgb(221,116,17)" rx="2" ry="2" />
+<text  x="683.66" y="335.5" ></text>
+</g>
+<g >
+<title>java/util/concurrent/ConcurrentHashMap$ValuesView.iterator (2 samples, 0.01%)</title><rect x="1183.5" y="373" width="0.1" height="15.0" fill="rgb(252,49,26)" rx="2" ry="2" />
+<text  x="1186.45" y="383.5" ></text>
+</g>
+<g >
+<title>java/util/concurrent/ConcurrentHashMap$ValueIterator.&lt;init&gt; (2 samples, 0.01%)</title><rect x="1183.5" y="357" width="0.1" height="15.0" fill="rgb(221,18,43)" rx="2" ry="2" />
+<text  x="1186.45" y="367.5" ></text>
+</g>
+<g >
+<title>CodeCache::find_blob(void*) (3 samples, 0.01%)</title><rect x="679.6" y="341" width="0.2" height="15.0" fill="rgb(211,70,45)" rx="2" ry="2" />
+<text  x="682.63" y="351.5" ></text>
+</g>
+<g >
+<title>com/example/tink/bm/jmh_generated/JwtPublicKeyVerifyBenchmark_verifyJwt_signedWith1stKey_jmhTest.verifyJwt_signedWith1stKey_thrpt_jmhStub (9,261 samples, 42.82%)</title><rect x="678.3" y="421" width="505.3" height="15.0" fill="rgb(224,8,34)" rx="2" ry="2" />
+<text  x="681.32" y="431.5" >com/example/tink/bm/jmh_generated/JwtPublicKeyVerifyBenchmark_verifyJ..</text>
+</g>
+<g >
+<title>java/util/Arrays.copyOf (2 samples, 0.01%)</title><rect x="1181.4" y="309" width="0.1" height="15.0" fill="rgb(217,227,13)" rx="2" ry="2" />
+<text  x="1184.38" y="319.5" ></text>
+</g>
+<g >
+<title>java/security/Provider.newInstanceUtil (39 samples, 0.18%)</title><rect x="718.9" y="197" width="2.1" height="15.0" fill="rgb(223,58,8)" rx="2" ry="2" />
+<text  x="721.85" y="207.5" ></text>
+</g>
+<g >
+<title>PhaseIdealLoop::PhaseIdealLoop(PhaseIterGVN&amp;, LoopOptsMode) (2 samples, 0.01%)</title><rect x="1187.8" y="437" width="0.1" height="15.0" fill="rgb(222,148,6)" rx="2" ry="2" />
+<text  x="1190.76" y="447.5" ></text>
+</g>
+<g >
+<title>java/security/MessageDigest.update (162 samples, 0.75%)</title><rect x="750.3" y="309" width="8.8" height="15.0" fill="rgb(226,175,50)" rx="2" ry="2" />
+<text  x="753.28" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.decode (5 samples, 0.02%)</title><rect x="684.4" y="277" width="0.3" height="15.0" fill="rgb(245,46,7)" rx="2" ry="2" />
+<text  x="687.43" y="287.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.divWord (174 samples, 0.80%)</title><rect x="984.9" y="165" width="9.5" height="15.0" fill="rgb(227,157,40)" rx="2" ry="2" />
+<text  x="987.87" y="175.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/SHA2.implCompress (80 samples, 0.37%)</title><rect x="745.9" y="229" width="4.4" height="15.0" fill="rgb(238,86,35)" rx="2" ry="2" />
+<text  x="748.91" y="239.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.addDisjoint (4 samples, 0.02%)</title><rect x="937.7" y="261" width="0.2" height="15.0" fill="rgb(250,11,1)" rx="2" ry="2" />
+<text  x="940.73" y="271.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/SubtleUtil.bytes2Integer (105 samples, 0.49%)</title><rect x="759.1" y="341" width="5.7" height="15.0" fill="rgb(211,125,48)" rx="2" ry="2" />
+<text  x="762.11" y="351.5" ></text>
+</g>
+<g >
+<title>CodeCache::find_blob(void*) (9 samples, 0.04%)</title><rect x="742.1" y="165" width="0.5" height="15.0" fill="rgb(207,12,47)" rx="2" ry="2" />
+<text  x="745.15" y="175.5" ></text>
+</g>
+<g >
+<title>ObjArrayAllocator::initialize(HeapWord*) const (2 samples, 0.01%)</title><rect x="737.0" y="133" width="0.1" height="15.0" fill="rgb(227,141,28)" rx="2" ry="2" />
+<text  x="739.96" y="143.5" ></text>
+</g>
+<g >
+<title>G1ParTask::work(unsigned int) (43 samples, 0.20%)</title><rect x="1184.0" y="533" width="2.3" height="15.0" fill="rgb(236,4,49)" rx="2" ry="2" />
+<text  x="1187.00" y="543.5" ></text>
+</g>
+<g >
+<title>pthread_jit_write_protect_np (6 samples, 0.03%)</title><rect x="1183.0" y="309" width="0.3" height="15.0" fill="rgb(224,37,11)" rx="2" ry="2" />
+<text  x="1185.96" y="319.5" ></text>
+</g>
+<g >
+<title>java/lang/String.checkBoundsBeginEnd (7 samples, 0.03%)</title><rect x="707.1" y="325" width="0.4" height="15.0" fill="rgb(226,32,53)" rx="2" ry="2" />
+<text  x="710.12" y="335.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/EngineWrapper$TMessageDigest.getInstance (56 samples, 0.26%)</title><rect x="718.5" y="293" width="3.0" height="15.0" fill="rgb(223,47,29)" rx="2" ry="2" />
+<text  x="721.47" y="303.5" ></text>
+</g>
+<g >
+<title>frame::oops_interpreted_do(OopClosure*, RegisterMap const*, bool) (3 samples, 0.01%)</title><rect x="1186.1" y="437" width="0.2" height="15.0" fill="rgb(230,50,35)" rx="2" ry="2" />
+<text  x="1189.13" y="447.5" ></text>
+</g>
+<g >
+<title>ThreadSafepointState::handle_polling_page_exception() (4 samples, 0.02%)</title><rect x="773.3" y="277" width="0.2" height="15.0" fill="rgb(206,32,22)" rx="2" ry="2" />
+<text  x="776.30" y="287.5" ></text>
+</g>
+<g >
+<title>JVM_GetNanoTimeAdjustment (18 samples, 0.08%)</title><rect x="714.3" y="293" width="1.0" height="15.0" fill="rgb(218,190,23)" rx="2" ry="2" />
+<text  x="717.32" y="303.5" ></text>
+</g>
+<g >
+<title>Klass::java_mirror() const (9 samples, 0.04%)</title><rect x="738.7" y="165" width="0.4" height="15.0" fill="rgb(240,105,51)" rx="2" ry="2" />
+<text  x="741.66" y="175.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.normalize (2 samples, 0.01%)</title><rect x="1180.9" y="309" width="0.1" height="15.0" fill="rgb(249,227,31)" rx="2" ry="2" />
+<text  x="1183.89" y="319.5" ></text>
+</g>
+<g >
+<title>__psynch_cvwait (5 samples, 0.02%)</title><rect x="770.6" y="197" width="0.2" height="15.0" fill="rgb(232,199,28)" rx="2" ry="2" />
+<text  x="773.57" y="207.5" ></text>
+</g>
+<g >
+<title>WatcherThread::sleep() const (18 samples, 0.08%)</title><rect x="1189.0" y="549" width="1.0" height="15.0" fill="rgb(215,6,11)" rx="2" ry="2" />
+<text  x="1192.02" y="559.5" ></text>
+</g>
+<g >
+<title>arrayof_jlong_disjoint_arraycopy (3 samples, 0.01%)</title><rect x="935.7" y="245" width="0.1" height="15.0" fill="rgb(215,186,5)" rx="2" ry="2" />
+<text  x="938.66" y="255.5" ></text>
+</g>
+<g >
+<title>java/lang/Class.privateGetDeclaredConstructors (5 samples, 0.02%)</title><rect x="719.0" y="149" width="0.3" height="15.0" fill="rgb(222,193,30)" rx="2" ry="2" />
+<text  x="722.01" y="159.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.materialize (3 samples, 0.01%)</title><rect x="934.5" y="293" width="0.1" height="15.0" fill="rgb(205,107,40)" rx="2" ry="2" />
+<text  x="937.46" y="303.5" ></text>
+</g>
+<g >
+<title>frame::sender_for_compiled_frame(RegisterMap*) const (6 samples, 0.03%)</title><rect x="764.5" y="261" width="0.3" height="15.0" fill="rgb(211,46,37)" rx="2" ry="2" />
+<text  x="767.46" y="271.5" ></text>
+</g>
+<g >
+<title>OptoRuntime::handle_exception_C_helper(JavaThread*, nmethod*&amp;) (8 samples, 0.04%)</title><rect x="680.1" y="341" width="0.4" height="15.0" fill="rgb(234,38,32)" rx="2" ry="2" />
+<text  x="683.06" y="351.5" ></text>
+</g>
+<g >
+<title>tlv_get_addr (2 samples, 0.01%)</title><rect x="737.1" y="133" width="0.1" height="15.0" fill="rgb(241,75,38)" rx="2" ry="2" />
+<text  x="740.07" y="143.5" ></text>
+</g>
+<g >
+<title>jdk/internal/reflect/NativeMethodAccessorImpl.invoke (9,264 samples, 42.83%)</title><rect x="678.2" y="469" width="505.4" height="15.0" fill="rgb(236,104,3)" rx="2" ry="2" />
+<text  x="681.15" y="479.5" >jdk/internal/reflect/NativeMethodAccessorImpl.invoke</text>
+</g>
+<g >
+<title>[not_walkable_Java] (5 samples, 0.02%)</title><rect x="10.0" y="629" width="0.3" height="15.0" fill="rgb(248,109,53)" rx="2" ry="2" />
+<text  x="13.00" y="639.5" ></text>
+</g>
+<g >
+<title>java/nio/HeapByteBuffer.&lt;init&gt; (2 samples, 0.01%)</title><rect x="679.2" y="341" width="0.1" height="15.0" fill="rgb(215,75,2)" rx="2" ry="2" />
+<text  x="682.19" y="351.5" ></text>
+</g>
+<g >
+<title>OptoRuntime::handle_exception_C(JavaThread*) (19 samples, 0.09%)</title><rect x="1182.4" y="341" width="1.1" height="15.0" fill="rgb(205,128,14)" rx="2" ry="2" />
+<text  x="1185.42" y="351.5" ></text>
+</g>
+<g >
+<title>InterpreterOopMap::iterate_oop(OffsetClosure*) const (2 samples, 0.01%)</title><rect x="1186.1" y="421" width="0.1" height="15.0" fill="rgb(247,20,17)" rx="2" ry="2" />
+<text  x="1189.13" y="431.5" ></text>
+</g>
+<g >
+<title>BacktraceBuilder::push(Method*, int, Thread*) (6 samples, 0.03%)</title><rect x="732.6" y="197" width="0.3" height="15.0" fill="rgb(233,166,14)" rx="2" ry="2" />
+<text  x="735.60" y="207.5" ></text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.nextNonWhitespace (2 samples, 0.01%)</title><rect x="681.5" y="293" width="0.1" height="15.0" fill="rgb(208,129,18)" rx="2" ry="2" />
+<text  x="684.48" y="303.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.validateUtf8 (12 samples, 0.06%)</title><rect x="690.9" y="325" width="0.7" height="15.0" fill="rgb(227,71,54)" rx="2" ry="2" />
+<text  x="693.92" y="335.5" ></text>
+</g>
+<g >
+<title>methodHandle::~methodHandle() (2 samples, 0.01%)</title><rect x="742.9" y="213" width="0.1" height="15.0" fill="rgb(231,103,3)" rx="2" ry="2" />
+<text  x="745.91" y="223.5" ></text>
+</g>
+<g >
+<title>java/lang/Class.reflectionData (2 samples, 0.01%)</title><rect x="719.2" y="133" width="0.1" height="15.0" fill="rgb(223,210,16)" rx="2" ry="2" />
+<text  x="722.18" y="143.5" ></text>
+</g>
+<g >
+<title>java/security/MessageDigest$Delegate.engineUpdate (10 samples, 0.05%)</title><rect x="731.2" y="293" width="0.5" height="15.0" fill="rgb(219,72,10)" rx="2" ry="2" />
+<text  x="734.18" y="303.5" ></text>
+</g>
+<g >
+<title>PcDescContainer::find_pc_desc_internal(unsigned char*, bool, PcDescSearch const&amp;) (2 samples, 0.01%)</title><rect x="739.4" y="165" width="0.1" height="15.0" fill="rgb(229,21,52)" rx="2" ry="2" />
+<text  x="742.42" y="175.5" ></text>
+</g>
+<g >
+<title>multiplyToLen (282 samples, 1.30%)</title><rect x="939.2" y="181" width="15.4" height="15.0" fill="rgb(208,206,22)" rx="2" ry="2" />
+<text  x="942.20" y="191.5" ></text>
+</g>
+<g >
+<title>Monitor::ILock(Thread*) (3 samples, 0.01%)</title><rect x="1168.9" y="69" width="0.2" height="15.0" fill="rgb(213,34,5)" rx="2" ry="2" />
+<text  x="1171.94" y="79.5" ></text>
+</g>
+<g >
+<title>java/lang/StringCoding.resultCached (6 samples, 0.03%)</title><rect x="691.6" y="261" width="0.3" height="15.0" fill="rgb(244,218,26)" rx="2" ry="2" />
+<text  x="694.57" y="271.5" ></text>
+</g>
+<g >
+<title>__psynch_cvwait (4 samples, 0.02%)</title><rect x="773.3" y="181" width="0.2" height="15.0" fill="rgb(245,15,9)" rx="2" ry="2" />
+<text  x="776.30" y="191.5" ></text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.&lt;init&gt; (3 samples, 0.01%)</title><rect x="716.5" y="309" width="0.1" height="15.0" fill="rgb(214,29,41)" rx="2" ry="2" />
+<text  x="719.45" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/RawJwt.&lt;init&gt; (2 samples, 0.01%)</title><rect x="678.2" y="357" width="0.1" height="15.0" fill="rgb(238,28,8)" rx="2" ry="2" />
+<text  x="681.21" y="367.5" ></text>
+</g>
+<g >
+<title>CodeCache::find_blob(void*) (10 samples, 0.05%)</title><rect x="741.0" y="165" width="0.5" height="15.0" fill="rgb(245,34,35)" rx="2" ry="2" />
+<text  x="744.00" y="175.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/SHA2.implDigest (86 samples, 0.40%)</title><rect x="745.6" y="245" width="4.7" height="15.0" fill="rgb(228,208,50)" rx="2" ry="2" />
+<text  x="748.58" y="255.5" ></text>
+</g>
+<g >
+<title>JavaThread::oops_do(OopClosure*, CodeBlobClosure*) (4 samples, 0.02%)</title><rect x="1186.1" y="453" width="0.2" height="15.0" fill="rgb(250,154,27)" rx="2" ry="2" />
+<text  x="1189.07" y="463.5" ></text>
+</g>
+<g >
+<title>OptoRuntime::handle_exception_C_helper(JavaThread*, nmethod*&amp;) (15 samples, 0.07%)</title><rect x="1182.5" y="325" width="0.8" height="15.0" fill="rgb(231,195,45)" rx="2" ry="2" />
+<text  x="1185.47" y="335.5" ></text>
+</g>
+<g >
+<title>java/nio/charset/CharsetDecoder.decode (10 samples, 0.05%)</title><rect x="684.9" y="309" width="0.5" height="15.0" fill="rgb(223,122,5)" rx="2" ry="2" />
+<text  x="687.86" y="319.5" ></text>
+</g>
+<g >
+<title>OptoRuntime::rethrow_C(oopDesc*, JavaThread*, unsigned char*) (33 samples, 0.15%)</title><rect x="10.5" y="597" width="1.8" height="15.0" fill="rgb(224,136,25)" rx="2" ry="2" />
+<text  x="13.55" y="607.5" ></text>
+</g>
+<g >
+<title>java/lang/Class.getConstructor (9 samples, 0.04%)</title><rect x="718.9" y="181" width="0.4" height="15.0" fill="rgb(222,220,46)" rx="2" ry="2" />
+<text  x="721.85" y="191.5" ></text>
+</g>
+<g >
+<title>zero_blocks (4 samples, 0.02%)</title><rect x="1172.9" y="165" width="0.2" height="15.0" fill="rgb(245,182,23)" rx="2" ry="2" />
+<text  x="1175.92" y="175.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.find (3 samples, 0.01%)</title><rect x="717.2" y="261" width="0.1" height="15.0" fill="rgb(244,125,27)" rx="2" ry="2" />
+<text  x="720.16" y="271.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.put (2 samples, 0.01%)</title><rect x="715.5" y="245" width="0.1" height="15.0" fill="rgb(206,123,39)" rx="2" ry="2" />
+<text  x="718.52" y="255.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/SHA.implDigest (12 samples, 0.06%)</title><rect x="744.9" y="245" width="0.7" height="15.0" fill="rgb(206,129,18)" rx="2" ry="2" />
+<text  x="747.93" y="255.5" ></text>
+</g>
+<g >
+<title>swtch_pri (13 samples, 0.06%)</title><rect x="1184.4" y="485" width="0.7" height="15.0" fill="rgb(226,38,15)" rx="2" ry="2" />
+<text  x="1187.44" y="495.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.strictUrlSafeDecode (87 samples, 0.40%)</title><rect x="686.2" y="325" width="4.7" height="15.0" fill="rgb(242,226,20)" rx="2" ry="2" />
+<text  x="689.17" y="335.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.divide2n1n (3,904 samples, 18.05%)</title><rect x="960.4" y="229" width="213.0" height="15.0" fill="rgb(214,19,35)" rx="2" ry="2" />
+<text  x="963.37" y="239.5" >java/math/MutableBigInteger...</text>
+</g>
+<g >
+<title>__psynch_cvwait (2 samples, 0.01%)</title><rect x="1188.3" y="453" width="0.1" height="15.0" fill="rgb(254,75,5)" rx="2" ry="2" />
+<text  x="1191.25" y="463.5" ></text>
+</g>
+<g >
+<title>G1ParEvacuateFollowersClosure::do_void() (21 samples, 0.10%)</title><rect x="1184.0" y="517" width="1.1" height="15.0" fill="rgb(239,120,46)" rx="2" ry="2" />
+<text  x="1187.00" y="527.5" ></text>
+</g>
+<g >
+<title>VMThread::loop() (11 samples, 0.05%)</title><rect x="1188.4" y="549" width="0.6" height="15.0" fill="rgb(242,161,10)" rx="2" ry="2" />
+<text  x="1191.42" y="559.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.primitiveLeftShift (5 samples, 0.02%)</title><rect x="1180.0" y="213" width="0.2" height="15.0" fill="rgb(254,193,26)" rx="2" ry="2" />
+<text  x="1182.96" y="223.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/RawJwt.getStringClaimInternal (2 samples, 0.01%)</title><rect x="713.9" y="309" width="0.1" height="15.0" fill="rgb(254,224,0)" rx="2" ry="2" />
+<text  x="716.89" y="319.5" ></text>
+</g>
+<g >
+<title>CodeCache::get_code_heap_containing(void*) (5 samples, 0.02%)</title><rect x="742.1" y="133" width="0.3" height="15.0" fill="rgb(246,49,7)" rx="2" ry="2" />
+<text  x="745.15" y="143.5" ></text>
+</g>
+<g >
+<title>frame::sender_for_compiled_frame(RegisterMap*) const (2 samples, 0.01%)</title><rect x="680.5" y="341" width="0.1" height="15.0" fill="rgb(247,173,7)" rx="2" ry="2" />
+<text  x="683.50" y="351.5" ></text>
+</g>
+<g >
+<title>org/openjdk/jmh/runner/ForkedMain.main (2 samples, 0.01%)</title><rect x="1183.6" y="629" width="0.1" height="15.0" fill="rgb(244,148,32)" rx="2" ry="2" />
+<text  x="1186.56" y="639.5" ></text>
+</g>
+<g >
+<title>java/lang/Exception.&lt;init&gt; (238 samples, 1.10%)</title><rect x="731.7" y="309" width="13.0" height="15.0" fill="rgb(254,9,27)" rx="2" ry="2" />
+<text  x="734.73" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.splitSignedCompact (574 samples, 2.65%)</title><rect x="682.1" y="357" width="31.3" height="15.0" fill="rgb(253,36,48)" rx="2" ry="2" />
+<text  x="685.13" y="367.5" >co..</text>
+</g>
+<g >
+<title>java/security/MessageDigest.digest (101 samples, 0.47%)</title><rect x="744.8" y="309" width="5.5" height="15.0" fill="rgb(206,114,49)" rx="2" ry="2" />
+<text  x="747.77" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtValidator.validateTimestampClaims (26 samples, 0.12%)</title><rect x="714.0" y="341" width="1.4" height="15.0" fill="rgb(240,209,16)" rx="2" ry="2" />
+<text  x="717.00" y="351.5" ></text>
+</g>
+<g >
+<title>Monitor::IWait(Thread*, long) (5 samples, 0.02%)</title><rect x="1188.4" y="517" width="0.3" height="15.0" fill="rgb(248,193,23)" rx="2" ry="2" />
+<text  x="1191.42" y="527.5" ></text>
+</g>
+<g >
+<title>HeapRegionRemSetIterator::has_next(unsigned long&amp;) (2 samples, 0.01%)</title><rect x="1185.9" y="453" width="0.1" height="15.0" fill="rgb(205,138,10)" rx="2" ry="2" />
+<text  x="1188.91" y="463.5" ></text>
+</g>
+<g >
+<title>java/lang/StringLatin1.newString (102 samples, 0.47%)</title><rect x="707.9" y="325" width="5.5" height="15.0" fill="rgb(220,83,32)" rx="2" ry="2" />
+<text  x="710.89" y="335.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/SubtleUtil.integer2Bytes (75 samples, 0.35%)</title><rect x="764.8" y="341" width="4.1" height="15.0" fill="rgb(216,89,41)" rx="2" ry="2" />
+<text  x="767.84" y="351.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.divideKnuth (3,897 samples, 18.02%)</title><rect x="960.8" y="213" width="212.6" height="15.0" fill="rgb(211,180,31)" rx="2" ry="2" />
+<text  x="963.75" y="223.5" >java/math/MutableBigInteger...</text>
+</g>
+<g >
+<title>org/openjdk/jmh/runner/BenchmarkHandler$BenchmarkTask.call (9,264 samples, 42.83%)</title><rect x="678.2" y="517" width="505.4" height="15.0" fill="rgb(249,198,8)" rx="2" ry="2" />
+<text  x="681.15" y="527.5" >org/openjdk/jmh/runner/BenchmarkHandler$BenchmarkTask.call</text>
+</g>
+<g >
+<title>jdk/internal/reflect/Reflection.verifyMemberAccess (18 samples, 0.08%)</title><rect x="719.7" y="117" width="1.0" height="15.0" fill="rgb(216,67,35)" rx="2" ry="2" />
+<text  x="722.67" y="127.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.findByObject (3 samples, 0.01%)</title><rect x="713.6" y="293" width="0.2" height="15.0" fill="rgb(234,7,9)" rx="2" ry="2" />
+<text  x="716.61" y="303.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.findByObject (3 samples, 0.01%)</title><rect x="717.6" y="277" width="0.2" height="15.0" fill="rgb(221,222,24)" rx="2" ry="2" />
+<text  x="720.60" y="287.5" ></text>
+</g>
+<g >
+<title>SafepointSynchronize::block(JavaThread*) (4 samples, 0.02%)</title><rect x="773.3" y="245" width="0.2" height="15.0" fill="rgb(230,99,9)" rx="2" ry="2" />
+<text  x="776.30" y="255.5" ></text>
+</g>
+<g >
+<title>sun/security/jca/GetInstance.getInstance (5 samples, 0.02%)</title><rect x="721.5" y="229" width="0.3" height="15.0" fill="rgb(216,226,18)" rx="2" ry="2" />
+<text  x="724.52" y="239.5" ></text>
+</g>
+<g >
+<title>has_negatives (2 samples, 0.01%)</title><rect x="686.1" y="229" width="0.1" height="15.0" fill="rgb(239,158,43)" rx="2" ry="2" />
+<text  x="689.06" y="239.5" ></text>
+</g>
+<g >
+<title>sun/nio/cs/UTF_8.newDecoder (4 samples, 0.02%)</title><rect x="691.4" y="309" width="0.2" height="15.0" fill="rgb(216,63,26)" rx="2" ry="2" />
+<text  x="694.35" y="319.5" ></text>
+</g>
+<g >
+<title>G1CollectionSet::iterate_from(HeapRegionClosure*, unsigned int, unsigned int) const (14 samples, 0.06%)</title><rect x="1185.3" y="501" width="0.7" height="15.0" fill="rgb(229,65,50)" rx="2" ry="2" />
+<text  x="1188.25" y="511.5" ></text>
+</g>
+<g >
+<title>jint_disjoint_arraycopy (2 samples, 0.01%)</title><rect x="1179.7" y="165" width="0.1" height="15.0" fill="rgb(216,147,4)" rx="2" ry="2" />
+<text  x="1182.69" y="175.5" ></text>
+</g>
+<g >
+<title>java/security/MessageDigest$Delegate.engineDigest (168 samples, 0.78%)</title><rect x="722.0" y="293" width="9.2" height="15.0" fill="rgb(253,75,27)" rx="2" ry="2" />
+<text  x="725.02" y="303.5" ></text>
+</g>
+<g >
+<title>CompileBroker::compiler_thread_loop() (18 samples, 0.08%)</title><rect x="1187.4" y="533" width="1.0" height="15.0" fill="rgb(247,31,18)" rx="2" ry="2" />
+<text  x="1190.38" y="543.5" ></text>
+</g>
+<g >
+<title>CompiledMethod::find_pc_desc(unsigned char*, bool) (2 samples, 0.01%)</title><rect x="732.9" y="197" width="0.1" height="15.0" fill="rgb(205,166,46)" rx="2" ry="2" />
+<text  x="735.93" y="207.5" ></text>
+</g>
+<g >
+<title>CodeCache::find_blob(void*) (2 samples, 0.01%)</title><rect x="739.2" y="181" width="0.1" height="15.0" fill="rgb(206,4,47)" rx="2" ry="2" />
+<text  x="742.20" y="191.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.divideKnuth (3,897 samples, 18.02%)</title><rect x="960.8" y="197" width="212.6" height="15.0" fill="rgb(242,189,48)" rx="2" ry="2" />
+<text  x="963.75" y="207.5" >java/math/MutableBigInteger...</text>
+</g>
+<g >
+<title>has_negatives (3 samples, 0.01%)</title><rect x="707.0" y="325" width="0.1" height="15.0" fill="rgb(212,128,42)" rx="2" ry="2" />
+<text  x="709.96" y="335.5" ></text>
+</g>
+<g >
+<title>GangWorker::run_task(WorkData) (47 samples, 0.22%)</title><rect x="1183.8" y="549" width="2.6" height="15.0" fill="rgb(227,145,46)" rx="2" ry="2" />
+<text  x="1186.84" y="559.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtRsaSsaPssVerifyKeyManager$1$1.verifyAndDecodeWithKid (9,204 samples, 42.55%)</title><rect x="679.4" y="373" width="502.1" height="15.0" fill="rgb(243,192,34)" rx="2" ry="2" />
+<text  x="682.35" y="383.5" >com/google/crypto/tink/jwt/JwtRsaSsaPssVerifyKeyManager$1$1.verifyAn..</text>
+</g>
+<g >
+<title>zero_blocks (4 samples, 0.02%)</title><rect x="937.5" y="245" width="0.2" height="15.0" fill="rgb(207,154,42)" rx="2" ry="2" />
+<text  x="940.51" y="255.5" ></text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.hasNext (2 samples, 0.01%)</title><rect x="681.2" y="293" width="0.1" height="15.0" fill="rgb(233,46,38)" rx="2" ry="2" />
+<text  x="684.21" y="303.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.strictUrlSafeDecode (47 samples, 0.22%)</title><rect x="682.1" y="325" width="2.6" height="15.0" fill="rgb(253,34,3)" rx="2" ry="2" />
+<text  x="685.13" y="335.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.implCompressMultiBlock0 (144 samples, 0.67%)</title><rect x="751.2" y="245" width="7.9" height="15.0" fill="rgb(218,216,39)" rx="2" ry="2" />
+<text  x="754.20" y="255.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/ByteArrayAccess.i2bBig (4 samples, 0.02%)</title><rect x="722.1" y="229" width="0.2" height="15.0" fill="rgb(213,118,10)" rx="2" ry="2" />
+<text  x="725.12" y="239.5" ></text>
+</g>
+<g >
+<title>mach_absolute_time (6 samples, 0.03%)</title><rect x="714.5" y="245" width="0.3" height="15.0" fill="rgb(233,181,10)" rx="2" ry="2" />
+<text  x="717.49" y="255.5" ></text>
+</g>
+<g >
+<title>jdk/internal/math/FloatingDecimal.readJavaFormatString (4 samples, 0.02%)</title><rect x="717.9" y="245" width="0.2" height="15.0" fill="rgb(240,82,12)" rx="2" ry="2" />
+<text  x="720.92" y="255.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.decodeHeader (74 samples, 0.34%)</title><rect x="682.1" y="341" width="4.1" height="15.0" fill="rgb(229,182,25)" rx="2" ry="2" />
+<text  x="685.13" y="351.5" ></text>
+</g>
+<g >
+<title>java/nio/HeapByteBuffer.&lt;init&gt; (3 samples, 0.01%)</title><rect x="684.7" y="277" width="0.2" height="15.0" fill="rgb(226,6,49)" rx="2" ry="2" />
+<text  x="687.70" y="287.5" ></text>
+</g>
+<g >
+<title>com/google/gson/JsonObject.get (5 samples, 0.02%)</title><rect x="717.3" y="309" width="0.3" height="15.0" fill="rgb(215,192,7)" rx="2" ry="2" />
+<text  x="720.32" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.containsKey (3 samples, 0.01%)</title><rect x="714.2" y="293" width="0.1" height="15.0" fill="rgb(220,206,46)" rx="2" ry="2" />
+<text  x="717.16" y="303.5" ></text>
+</g>
+<g >
+<title>com/google/gson/JsonObject.get (2 samples, 0.01%)</title><rect x="678.2" y="325" width="0.1" height="15.0" fill="rgb(232,204,10)" rx="2" ry="2" />
+<text  x="681.21" y="335.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.validateHeader (8 samples, 0.04%)</title><rect x="713.4" y="357" width="0.5" height="15.0" fill="rgb(206,150,33)" rx="2" ry="2" />
+<text  x="716.45" y="367.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.&lt;init&gt; (2 samples, 0.01%)</title><rect x="960.4" y="213" width="0.1" height="15.0" fill="rgb(224,151,48)" rx="2" ry="2" />
+<text  x="963.37" y="223.5" ></text>
+</g>
+<g >
+<title>com/google/gson/JsonObject.has (3 samples, 0.01%)</title><rect x="717.6" y="309" width="0.2" height="15.0" fill="rgb(226,126,20)" rx="2" ry="2" />
+<text  x="720.60" y="319.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.mulAdd (38 samples, 0.18%)</title><rect x="931.6" y="293" width="2.1" height="15.0" fill="rgb(227,17,49)" rx="2" ry="2" />
+<text  x="934.62" y="303.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/SubtleUtil.mgf1 (187 samples, 0.86%)</title><rect x="721.5" y="325" width="10.2" height="15.0" fill="rgb(232,0,36)" rx="2" ry="2" />
+<text  x="724.52" y="335.5" ></text>
+</g>
+<g >
+<title>JavaThread::run() (19 samples, 0.09%)</title><rect x="1187.4" y="565" width="1.0" height="15.0" fill="rgb(246,51,54)" rx="2" ry="2" />
+<text  x="1190.38" y="575.5" ></text>
+</g>
+<g >
+<title>os::javaTimeSystemUTC(long&amp;, long&amp;) (8 samples, 0.04%)</title><rect x="714.4" y="277" width="0.4" height="15.0" fill="rgb(252,224,16)" rx="2" ry="2" />
+<text  x="717.38" y="287.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.&lt;init&gt; (4 samples, 0.02%)</title><rect x="770.8" y="309" width="0.3" height="15.0" fill="rgb(221,172,2)" rx="2" ry="2" />
+<text  x="773.84" y="319.5" ></text>
+</g>
+<g >
+<title>java/security/Provider$ServiceKey.&lt;init&gt; (6 samples, 0.03%)</title><rect x="721.0" y="197" width="0.4" height="15.0" fill="rgb(205,45,1)" rx="2" ry="2" />
+<text  x="724.03" y="207.5" ></text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.doPeek (5 samples, 0.02%)</title><rect x="681.3" y="309" width="0.3" height="15.0" fill="rgb(225,177,40)" rx="2" ry="2" />
+<text  x="684.32" y="319.5" ></text>
+</g>
+<g >
+<title>Compile::optimize_loops(int&amp;, PhaseIterGVN&amp;, LoopOptsMode) (2 samples, 0.01%)</title><rect x="1187.8" y="453" width="0.1" height="15.0" fill="rgb(215,203,53)" rx="2" ry="2" />
+<text  x="1190.76" y="463.5" ></text>
+</g>
+<g >
+<title>sun/nio/cs/UTF_8$Decoder.decodeLoop (10 samples, 0.05%)</title><rect x="684.9" y="277" width="0.5" height="15.0" fill="rgb(243,4,4)" rx="2" ry="2" />
+<text  x="687.86" y="287.5" ></text>
+</g>
+<g >
+<title>java/nio/charset/CharsetDecoder.&lt;init&gt; (4 samples, 0.02%)</title><rect x="691.4" y="261" width="0.2" height="15.0" fill="rgb(245,48,53)" rx="2" ry="2" />
+<text  x="694.35" y="271.5" ></text>
+</g>
+<g >
+<title>Monitor::IWait(Thread*, long) (3 samples, 0.01%)</title><rect x="1183.7" y="501" width="0.1" height="15.0" fill="rgb(205,139,0)" rx="2" ry="2" />
+<text  x="1186.67" y="511.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.montgomerySquare (16 samples, 0.07%)</title><rect x="933.7" y="309" width="0.9" height="15.0" fill="rgb(251,53,23)" rx="2" ry="2" />
+<text  x="936.75" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.getStringHeader (3 samples, 0.01%)</title><rect x="713.6" y="341" width="0.2" height="15.0" fill="rgb(208,76,37)" rx="2" ry="2" />
+<text  x="716.61" y="351.5" ></text>
+</g>
+<g >
+<title>MemAllocator::Allocation::notify_allocation_jfr_sampler() (5 samples, 0.02%)</title><rect x="735.9" y="101" width="0.3" height="15.0" fill="rgb(212,151,3)" rx="2" ry="2" />
+<text  x="738.93" y="111.5" ></text>
+</g>
+<g >
+<title>jint_disjoint_arraycopy (9 samples, 0.04%)</title><rect x="935.9" y="245" width="0.5" height="15.0" fill="rgb(214,47,39)" rx="2" ry="2" />
+<text  x="938.93" y="255.5" ></text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.fillBuffer (2 samples, 0.01%)</title><rect x="716.3" y="245" width="0.2" height="15.0" fill="rgb(213,112,45)" rx="2" ry="2" />
+<text  x="719.34" y="255.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtRsaSsaPssVerifyKeyManager$1$1.verifyAndDecodeWithKid (3 samples, 0.01%)</title><rect x="678.2" y="389" width="0.1" height="15.0" fill="rgb(246,16,26)" rx="2" ry="2" />
+<text  x="681.15" y="399.5" ></text>
+</g>
+<g >
+<title>__psynch_cvwait (5 samples, 0.02%)</title><rect x="1188.4" y="485" width="0.3" height="15.0" fill="rgb(229,48,16)" rx="2" ry="2" />
+<text  x="1191.42" y="495.5" ></text>
+</g>
+<g >
+<title>java/util/concurrent/ConcurrentHashMap$ValueIterator.next (36 samples, 0.17%)</title><rect x="1181.5" y="373" width="2.0" height="15.0" fill="rgb(208,115,45)" rx="2" ry="2" />
+<text  x="1184.49" y="383.5" ></text>
+</g>
+<g >
+<title>SafepointBlob (4 samples, 0.02%)</title><rect x="770.3" y="309" width="0.2" height="15.0" fill="rgb(232,175,39)" rx="2" ry="2" />
+<text  x="773.30" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.decode (5 samples, 0.02%)</title><rect x="684.4" y="261" width="0.3" height="15.0" fill="rgb(226,38,0)" rx="2" ry="2" />
+<text  x="687.43" y="271.5" ></text>
+</g>
+<g >
+<title>[unknown_Java] (12,241 samples, 56.60%)</title><rect x="10.3" y="629" width="667.8" height="15.0" fill="rgb(240,101,36)" rx="2" ry="2" />
+<text  x="13.27" y="639.5" >[unknown_Java]</text>
+</g>
+<g >
+<title>pl/project13/scala/jmh/extras/profiler/AsyncProfiler.afterIteration (2 samples, 0.01%)</title><rect x="1183.6" y="501" width="0.1" height="15.0" fill="rgb(206,199,15)" rx="2" ry="2" />
+<text  x="1186.56" y="511.5" ></text>
+</g>
+<g >
+<title>java/lang/String.compareTo (2 samples, 0.01%)</title><rect x="717.1" y="229" width="0.1" height="15.0" fill="rgb(208,127,21)" rx="2" ry="2" />
+<text  x="720.05" y="239.5" ></text>
+</g>
+<g >
+<title>zero_blocks (2 samples, 0.01%)</title><rect x="720.7" y="133" width="0.1" height="15.0" fill="rgb(246,34,50)" rx="2" ry="2" />
+<text  x="723.65" y="143.5" ></text>
+</g>
+<g >
+<title>G1ScanRSForRegionClosure::do_heap_region(HeapRegion*) (14 samples, 0.06%)</title><rect x="1185.3" y="485" width="0.7" height="15.0" fill="rgb(226,215,19)" rx="2" ry="2" />
+<text  x="1188.25" y="495.5" ></text>
+</g>
+<g >
+<title>java/nio/ByteBuffer.allocate (2 samples, 0.01%)</title><rect x="679.2" y="357" width="0.1" height="15.0" fill="rgb(215,3,45)" rx="2" ry="2" />
+<text  x="682.19" y="367.5" ></text>
+</g>
+<g >
+<title>java/io/StringReader.read (2 samples, 0.01%)</title><rect x="716.3" y="229" width="0.2" height="15.0" fill="rgb(228,62,5)" rx="2" ry="2" />
+<text  x="719.34" y="239.5" ></text>
+</g>
+<g >
+<title>AccessInternal::PostRuntimeDispatch&lt;G1BarrierSet::AccessBarrier&lt;2670710ull, G1BarrierSet&gt;, (AccessInternal::BarrierType)1, 2670710ull&gt;::oop_access_barrier(oopDesc*, long, oopDesc*) (6 samples, 0.03%)</title><rect x="738.3" y="165" width="0.4" height="15.0" fill="rgb(209,5,23)" rx="2" ry="2" />
+<text  x="741.33" y="175.5" ></text>
+</g>
+<g >
+<title>G1EvacPhaseWithTrimTimeTracker::G1EvacPhaseWithTrimTimeTracker(G1ParScanThreadState*, TimeInterval&lt;CompositeCounterRepresentation, CompositeElapsedCounterSource&gt;&amp;, TimeInterval&lt;CompositeCounterRepresentation, CompositeElapsedCounterSource&gt;&amp;) (7 samples, 0.03%)</title><rect x="1185.3" y="469" width="0.3" height="15.0" fill="rgb(214,87,36)" rx="2" ry="2" />
+<text  x="1188.25" y="479.5" ></text>
+</g>
+<g >
+<title>OptoRuntime::handle_exception_C(JavaThread*) (25 samples, 0.12%)</title><rect x="763.4" y="277" width="1.4" height="15.0" fill="rgb(251,79,41)" rx="2" ry="2" />
+<text  x="766.42" y="287.5" ></text>
+</g>
+<g >
+<title>java/util/Arrays.copyOfRange (3 samples, 0.01%)</title><rect x="938.0" y="229" width="0.2" height="15.0" fill="rgb(246,32,9)" rx="2" ry="2" />
+<text  x="941.00" y="239.5" ></text>
+</g>
+<g >
+<title>ThreadInVMfromNative::~ThreadInVMfromNative() (2 samples, 0.01%)</title><rect x="732.3" y="213" width="0.1" height="15.0" fill="rgb(245,166,47)" rx="2" ry="2" />
+<text  x="735.27" y="223.5" ></text>
+</g>
+<g >
+<title>sun/security/jca/ProviderList.getService (8 samples, 0.04%)</title><rect x="721.0" y="229" width="0.5" height="15.0" fill="rgb(205,70,1)" rx="2" ry="2" />
+<text  x="724.03" y="239.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.implCompressMultiBlockCheck (3 samples, 0.01%)</title><rect x="731.6" y="245" width="0.1" height="15.0" fill="rgb(239,8,14)" rx="2" ry="2" />
+<text  x="734.56" y="255.5" ></text>
+</g>
+<g >
+<title>ThreadSafepointState::handle_polling_page_exception() (3 samples, 0.01%)</title><rect x="1168.9" y="133" width="0.2" height="15.0" fill="rgb(249,78,52)" rx="2" ry="2" />
+<text  x="1171.94" y="143.5" ></text>
+</g>
+<g >
+<title>com/example/tink/bm/JwtPublicKeyVerifyBenchmark.verifyJwt_signedWith1stKey (9,260 samples, 42.81%)</title><rect x="678.4" y="405" width="505.2" height="15.0" fill="rgb(214,212,28)" rx="2" ry="2" />
+<text  x="681.37" y="415.5" >com/example/tink/bm/JwtPublicKeyVerifyBenchmark.verifyJwt_signedWith1..</text>
+</g>
+<g >
+<title>sun/security/provider/SHA.implReset (3 samples, 0.01%)</title><rect x="745.3" y="197" width="0.2" height="15.0" fill="rgb(229,0,29)" rx="2" ry="2" />
+<text  x="748.31" y="207.5" ></text>
+</g>
+<g >
+<title>ParallelTaskTerminator::offer_termination(TerminatorTerminator*) (19 samples, 0.09%)</title><rect x="1184.1" y="501" width="1.0" height="15.0" fill="rgb(211,137,21)" rx="2" ry="2" />
+<text  x="1187.11" y="511.5" ></text>
+</g>
+<g >
+<title>java/lang/ThreadLocal.get (6 samples, 0.03%)</title><rect x="691.6" y="245" width="0.3" height="15.0" fill="rgb(227,220,21)" rx="2" ry="2" />
+<text  x="694.57" y="255.5" ></text>
+</g>
+<g >
+<title>java/security/MessageDigest$Delegate.engineDigest (101 samples, 0.47%)</title><rect x="744.8" y="293" width="5.5" height="15.0" fill="rgb(241,173,23)" rx="2" ry="2" />
+<text  x="747.77" y="303.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.engineDigest (168 samples, 0.78%)</title><rect x="722.0" y="261" width="9.2" height="15.0" fill="rgb(235,35,30)" rx="2" ry="2" />
+<text  x="725.02" y="271.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.engineReset (6 samples, 0.03%)</title><rect x="745.1" y="213" width="0.4" height="15.0" fill="rgb(213,155,38)" rx="2" ry="2" />
+<text  x="748.15" y="223.5" ></text>
+</g>
+<g >
+<title>CompiledMethod::find_pc_desc(unsigned char*, bool) (4 samples, 0.02%)</title><rect x="739.3" y="181" width="0.2" height="15.0" fill="rgb(244,79,14)" rx="2" ry="2" />
+<text  x="742.31" y="191.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.modPow (7,562 samples, 34.96%)</title><rect x="768.9" y="341" width="412.6" height="15.0" fill="rgb(210,137,31)" rx="2" ry="2" />
+<text  x="771.93" y="351.5" >java/math/BigInteger.modPow</text>
+</g>
+<g >
+<title>zero_blocks (2 samples, 0.01%)</title><rect x="745.3" y="165" width="0.1" height="15.0" fill="rgb(246,135,31)" rx="2" ry="2" />
+<text  x="748.31" y="175.5" ></text>
+</g>
+<g >
+<title>semaphore_wait_trap (18 samples, 0.08%)</title><rect x="1186.4" y="533" width="1.0" height="15.0" fill="rgb(205,5,25)" rx="2" ry="2" />
+<text  x="1189.40" y="543.5" ></text>
+</g>
+<g >
+<title>G1CollectedHeap::post_evacuate_collection_set(EvacuationInfo&amp;, G1ParScanThreadStateSet*) (2 samples, 0.01%)</title><rect x="1188.7" y="469" width="0.2" height="15.0" fill="rgb(223,101,4)" rx="2" ry="2" />
+<text  x="1191.75" y="479.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.divide3n2n (4,420 samples, 20.44%)</title><rect x="938.7" y="245" width="241.1" height="15.0" fill="rgb(219,40,30)" rx="2" ry="2" />
+<text  x="941.66" y="255.5" >java/math/MutableBigInteger.divi..</text>
+</g>
+<g >
+<title>java/lang/Throwable.&lt;init&gt; (238 samples, 1.10%)</title><rect x="731.7" y="293" width="13.0" height="15.0" fill="rgb(220,174,8)" rx="2" ry="2" />
+<text  x="734.73" y="303.5" ></text>
+</g>
+<g >
+<title>PhaseIdealLoop::build_and_optimize() (2 samples, 0.01%)</title><rect x="1187.8" y="421" width="0.1" height="15.0" fill="rgb(238,216,7)" rx="2" ry="2" />
+<text  x="1190.76" y="431.5" ></text>
+</g>
+<g >
+<title>java/nio/charset/CharsetDecoder.decode (10 samples, 0.05%)</title><rect x="684.9" y="293" width="0.5" height="15.0" fill="rgb(249,5,31)" rx="2" ry="2" />
+<text  x="687.86" y="303.5" ></text>
+</g>
+<g >
+<title>Monitor::wait(bool, long, bool) (5 samples, 0.02%)</title><rect x="1188.4" y="533" width="0.3" height="15.0" fill="rgb(222,150,3)" rx="2" ry="2" />
+<text  x="1191.42" y="543.5" ></text>
+</g>
+<g >
+<title>com/google/gson/JsonObject.&lt;init&gt; (2 samples, 0.01%)</title><rect x="680.9" y="277" width="0.1" height="15.0" fill="rgb(251,173,0)" rx="2" ry="2" />
+<text  x="683.88" y="287.5" ></text>
+</g>
+<g >
+<title>JavaThread::pd_last_frame() (9 samples, 0.04%)</title><rect x="739.6" y="181" width="0.5" height="15.0" fill="rgb(228,50,54)" rx="2" ry="2" />
+<text  x="742.58" y="191.5" ></text>
+</g>
+<g >
+<title>G1EvacPhaseWithTrimTimeTracker::stop() (2 samples, 0.01%)</title><rect x="1185.6" y="453" width="0.1" height="15.0" fill="rgb(226,181,27)" rx="2" ry="2" />
+<text  x="1188.64" y="463.5" ></text>
+</g>
+<g >
+<title>G1RootProcessor::process_java_roots(G1RootClosures*, G1GCPhaseTimes*, unsigned int) (5 samples, 0.02%)</title><rect x="1186.0" y="501" width="0.3" height="15.0" fill="rgb(244,138,35)" rx="2" ry="2" />
+<text  x="1189.02" y="511.5" ></text>
+</g>
+<g >
+<title>java_lang_Throwable::fill_in_stack_trace(Handle, methodHandle const&amp;, Thread*) (170 samples, 0.79%)</title><rect x="733.5" y="197" width="9.3" height="15.0" fill="rgb(221,99,15)" rx="2" ry="2" />
+<text  x="736.53" y="207.5" ></text>
+</g>
+<g >
+<title>java/util/Arrays.copyOfRange (10 samples, 0.05%)</title><rect x="1180.3" y="245" width="0.5" height="15.0" fill="rgb(245,101,48)" rx="2" ry="2" />
+<text  x="1183.29" y="255.5" ></text>
+</g>
+<g >
+<title>java/security/MessageDigest.digest (168 samples, 0.78%)</title><rect x="722.0" y="309" width="9.2" height="15.0" fill="rgb(217,141,23)" rx="2" ry="2" />
+<text  x="725.02" y="319.5" ></text>
+</g>
+<g >
+<title>os::javaTimeNanos() (2 samples, 0.01%)</title><rect x="1185.6" y="405" width="0.1" height="15.0" fill="rgb(220,183,44)" rx="2" ry="2" />
+<text  x="1188.64" y="415.5" ></text>
+</g>
+<g >
+<title>BacktraceBuilder::BacktraceBuilder(Thread*) (42 samples, 0.19%)</title><rect x="735.2" y="181" width="2.3" height="15.0" fill="rgb(220,40,3)" rx="2" ry="2" />
+<text  x="738.16" y="191.5" ></text>
+</g>
+<g >
+<title>VMThread::run() (11 samples, 0.05%)</title><rect x="1188.4" y="565" width="0.6" height="15.0" fill="rgb(241,77,42)" rx="2" ry="2" />
+<text  x="1191.42" y="575.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/RawJwt.fromJsonPayload (2 samples, 0.01%)</title><rect x="678.2" y="373" width="0.1" height="15.0" fill="rgb(235,3,19)" rx="2" ry="2" />
+<text  x="681.21" y="383.5" ></text>
+</g>
+<g >
+<title>java/lang/StringCoding.decodeUTF8 (9 samples, 0.04%)</title><rect x="685.7" y="277" width="0.5" height="15.0" fill="rgb(226,100,47)" rx="2" ry="2" />
+<text  x="688.68" y="287.5" ></text>
+</g>
+<g >
+<title>os::elapsed_counter() (2 samples, 0.01%)</title><rect x="1185.6" y="421" width="0.1" height="15.0" fill="rgb(242,210,4)" rx="2" ry="2" />
+<text  x="1188.64" y="431.5" ></text>
+</g>
+<g >
+<title>org/openjdk/jmh/runner/BaseRunner.runBenchmark (2 samples, 0.01%)</title><rect x="1183.6" y="549" width="0.1" height="15.0" fill="rgb(249,149,16)" rx="2" ry="2" />
+<text  x="1186.56" y="559.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/EngineFactory.getInstance (8 samples, 0.04%)</title><rect x="721.5" y="309" width="0.5" height="15.0" fill="rgb(226,109,45)" rx="2" ry="2" />
+<text  x="724.52" y="319.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.mulsub (3,203 samples, 14.81%)</title><rect x="994.4" y="165" width="174.7" height="15.0" fill="rgb(250,41,53)" rx="2" ry="2" />
+<text  x="997.36" y="175.5" >java/math/MutableBigIn..</text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.compare (3 samples, 0.01%)</title><rect x="960.0" y="229" width="0.2" height="15.0" fill="rgb(230,66,50)" rx="2" ry="2" />
+<text  x="963.04" y="239.5" ></text>
+</g>
+<g >
+<title>jdk/internal/math/FloatingDecimal.parseDouble (7 samples, 0.03%)</title><rect x="717.8" y="261" width="0.3" height="15.0" fill="rgb(214,157,32)" rx="2" ry="2" />
+<text  x="720.76" y="271.5" ></text>
+</g>
+<g >
+<title>Thread::call_run() (116 samples, 0.54%)</title><rect x="1183.7" y="581" width="6.3" height="15.0" fill="rgb(239,99,28)" rx="2" ry="2" />
+<text  x="1186.67" y="591.5" ></text>
+</g>
+<g >
+<title>SpinPause (3 samples, 0.01%)</title><rect x="1184.3" y="485" width="0.1" height="15.0" fill="rgb(209,228,47)" rx="2" ry="2" />
+<text  x="1187.27" y="495.5" ></text>
+</g>
+<g >
+<title>java/lang/String.length (4 samples, 0.02%)</title><rect x="681.6" y="325" width="0.3" height="15.0" fill="rgb(215,226,48)" rx="2" ry="2" />
+<text  x="684.64" y="335.5" ></text>
+</g>
+<g >
+<title>jdk/internal/reflect/DelegatingMethodAccessorImpl.invoke (9,264 samples, 42.83%)</title><rect x="678.2" y="485" width="505.4" height="15.0" fill="rgb(227,77,38)" rx="2" ry="2" />
+<text  x="681.15" y="495.5" >jdk/internal/reflect/DelegatingMethodAccessorImpl.invoke</text>
+</g>
+<g >
+<title>java/lang/Class.getConstructor0 (7 samples, 0.03%)</title><rect x="718.9" y="165" width="0.4" height="15.0" fill="rgb(212,3,10)" rx="2" ry="2" />
+<text  x="721.91" y="175.5" ></text>
+</g>
+<g >
+<title>CodeHeap::find_block_for(void*) const (2 samples, 0.01%)</title><rect x="742.5" y="133" width="0.1" height="15.0" fill="rgb(252,210,13)" rx="2" ry="2" />
+<text  x="745.53" y="143.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.divide (4,513 samples, 20.87%)</title><rect x="934.7" y="293" width="246.2" height="15.0" fill="rgb(233,228,32)" rx="2" ry="2" />
+<text  x="937.68" y="303.5" >java/math/MutableBigInteger.divide</text>
+</g>
+<g >
+<title>pthread_jit_write_protect_np (9 samples, 0.04%)</title><rect x="714.8" y="277" width="0.5" height="15.0" fill="rgb(216,27,13)" rx="2" ry="2" />
+<text  x="717.81" y="287.5" ></text>
+</g>
+<g >
+<title>java/lang/String.compareTo (4 samples, 0.02%)</title><rect x="717.4" y="245" width="0.2" height="15.0" fill="rgb(216,51,34)" rx="2" ry="2" />
+<text  x="720.38" y="255.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.findByObject (3 samples, 0.01%)</title><rect x="717.2" y="277" width="0.1" height="15.0" fill="rgb(243,128,43)" rx="2" ry="2" />
+<text  x="720.16" y="287.5" ></text>
+</g>
+<g >
+<title>has_negatives (6 samples, 0.03%)</title><rect x="707.2" y="309" width="0.3" height="15.0" fill="rgb(215,141,39)" rx="2" ry="2" />
+<text  x="710.18" y="319.5" ></text>
+</g>
+<g >
+<title>Monitor::lock_without_safepoint_check() (4 samples, 0.02%)</title><rect x="773.3" y="229" width="0.2" height="15.0" fill="rgb(225,135,10)" rx="2" ry="2" />
+<text  x="776.30" y="239.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.multiply (300 samples, 1.39%)</title><rect x="938.7" y="229" width="16.4" height="15.0" fill="rgb(234,186,1)" rx="2" ry="2" />
+<text  x="941.71" y="239.5" ></text>
+</g>
+<g >
+<title>java/util/Arrays.copyOfRange (61 samples, 0.28%)</title><rect x="710.1" y="309" width="3.3" height="15.0" fill="rgb(208,36,45)" rx="2" ry="2" />
+<text  x="713.12" y="319.5" ></text>
+</g>
+<g >
+<title>zero_blocks (3 samples, 0.01%)</title><rect x="768.8" y="309" width="0.1" height="15.0" fill="rgb(231,40,51)" rx="2" ry="2" />
+<text  x="771.77" y="319.5" ></text>
+</g>
+<g >
+<title>ThreadInVMfromJavaNoAsyncException::~ThreadInVMfromJavaNoAsyncException() (2 samples, 0.01%)</title><rect x="763.7" y="245" width="0.1" height="15.0" fill="rgb(245,153,46)" rx="2" ry="2" />
+<text  x="766.70" y="255.5" ></text>
+</g>
+<g >
+<title>all (21,629 samples, 100%)</title><rect x="10.0" y="645" width="1180.0" height="15.0" fill="rgb(205,34,17)" rx="2" ry="2" />
+<text  x="13.00" y="655.5" ></text>
+</g>
+<g >
+<title>MemAllocator::Allocation::notify_allocation_jvmti_sampler() (5 samples, 0.02%)</title><rect x="736.3" y="117" width="0.2" height="15.0" fill="rgb(226,106,42)" rx="2" ry="2" />
+<text  x="739.25" y="127.5" ></text>
+</g>
+<g >
+<title>ConcurrentGCThread::run() (3 samples, 0.01%)</title><rect x="1183.7" y="565" width="0.1" height="15.0" fill="rgb(226,212,29)" rx="2" ry="2" />
+<text  x="1186.67" y="575.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.&lt;init&gt; (105 samples, 0.49%)</title><rect x="759.1" y="309" width="5.7" height="15.0" fill="rgb(210,55,21)" rx="2" ry="2" />
+<text  x="762.11" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.find (4 samples, 0.02%)</title><rect x="717.4" y="261" width="0.2" height="15.0" fill="rgb(249,113,40)" rx="2" ry="2" />
+<text  x="720.38" y="271.5" ></text>
+</g>
+<g >
+<title>SafepointSynchronize::block(JavaThread*) (3 samples, 0.01%)</title><rect x="1168.9" y="101" width="0.2" height="15.0" fill="rgb(218,166,11)" rx="2" ry="2" />
+<text  x="1171.94" y="111.5" ></text>
+</g>
+<g >
+<title>BacktraceBuilder::push(Method*, int, Thread*) (30 samples, 0.14%)</title><rect x="737.5" y="181" width="1.6" height="15.0" fill="rgb(217,86,48)" rx="2" ry="2" />
+<text  x="740.51" y="191.5" ></text>
+</g>
+<g >
+<title>java/security/MessageDigest.digest (264 samples, 1.22%)</title><rect x="744.7" y="325" width="14.4" height="15.0" fill="rgb(205,207,45)" rx="2" ry="2" />
+<text  x="747.71" y="335.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/ByteArrayAccess.b2iBig64 (2 samples, 0.01%)</title><rect x="731.1" y="197" width="0.1" height="15.0" fill="rgb(252,129,44)" rx="2" ry="2" />
+<text  x="734.07" y="207.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/RawJwt.validateTimestampClaim (15 samples, 0.07%)</title><rect x="717.3" y="325" width="0.8" height="15.0" fill="rgb(228,22,11)" rx="2" ry="2" />
+<text  x="720.32" y="335.5" ></text>
+</g>
+<g >
+<title>org/openjdk/jmh/runner/BaseRunner.doSingle (2 samples, 0.01%)</title><rect x="1183.6" y="581" width="0.1" height="15.0" fill="rgb(226,106,21)" rx="2" ry="2" />
+<text  x="1186.56" y="591.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.&lt;init&gt; (4 samples, 0.02%)</title><rect x="960.5" y="197" width="0.2" height="15.0" fill="rgb(241,95,6)" rx="2" ry="2" />
+<text  x="963.48" y="207.5" ></text>
+</g>
+<g >
+<title>java/lang/String.substring (119 samples, 0.55%)</title><rect x="707.0" y="341" width="6.4" height="15.0" fill="rgb(205,224,50)" rx="2" ry="2" />
+<text  x="709.96" y="351.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.rightShift (6 samples, 0.03%)</title><rect x="1179.9" y="229" width="0.3" height="15.0" fill="rgb(232,90,49)" rx="2" ry="2" />
+<text  x="1182.91" y="239.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.add (73 samples, 0.34%)</title><rect x="955.5" y="213" width="4.0" height="15.0" fill="rgb(248,55,23)" rx="2" ry="2" />
+<text  x="958.52" y="223.5" ></text>
+</g>
+<g >
+<title>CodeHeap::find_block_for(void*) const (3 samples, 0.01%)</title><rect x="741.4" y="133" width="0.1" height="15.0" fill="rgb(244,169,2)" rx="2" ry="2" />
+<text  x="744.38" y="143.5" ></text>
+</g>
+<g >
+<title>java/lang/StringCoding.resultCached (9 samples, 0.04%)</title><rect x="685.7" y="261" width="0.5" height="15.0" fill="rgb(249,44,44)" rx="2" ry="2" />
+<text  x="688.68" y="271.5" ></text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.peek (5 samples, 0.02%)</title><rect x="681.3" y="325" width="0.3" height="15.0" fill="rgb(248,177,30)" rx="2" ry="2" />
+<text  x="684.32" y="335.5" ></text>
+</g>
+<g >
+<title>os::javaTimeNanos() (4 samples, 0.02%)</title><rect x="1185.4" y="421" width="0.2" height="15.0" fill="rgb(220,2,25)" rx="2" ry="2" />
+<text  x="1188.42" y="431.5" ></text>
+</g>
+<g >
+<title>SafepointSynchronize::block(JavaThread*) (5 samples, 0.02%)</title><rect x="770.6" y="261" width="0.2" height="15.0" fill="rgb(228,121,42)" rx="2" ry="2" />
+<text  x="773.57" y="271.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.implCompressMultiBlock (3 samples, 0.01%)</title><rect x="731.6" y="261" width="0.1" height="15.0" fill="rgb(225,86,39)" rx="2" ry="2" />
+<text  x="734.56" y="271.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.implMontgomeryMultiplyChecks (7 samples, 0.03%)</title><rect x="934.1" y="293" width="0.4" height="15.0" fill="rgb(205,57,21)" rx="2" ry="2" />
+<text  x="937.08" y="303.5" ></text>
+</g>
+<g >
+<title>Monitor::lock_without_safepoint_check() (5 samples, 0.02%)</title><rect x="770.6" y="245" width="0.2" height="15.0" fill="rgb(245,73,42)" rx="2" ry="2" />
+<text  x="773.57" y="255.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.bitLength (4 samples, 0.02%)</title><rect x="768.2" y="309" width="0.2" height="15.0" fill="rgb(253,105,39)" rx="2" ry="2" />
+<text  x="771.17" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.encode (10 samples, 0.05%)</title><rect x="678.6" y="325" width="0.5" height="15.0" fill="rgb(247,90,28)" rx="2" ry="2" />
+<text  x="681.59" y="335.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.addOne (2,896 samples, 13.39%)</title><rect x="773.5" y="293" width="158.0" height="15.0" fill="rgb(236,195,49)" rx="2" ry="2" />
+<text  x="776.52" y="303.5" >java/math/BigInteger..</text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.get (4 samples, 0.02%)</title><rect x="717.4" y="293" width="0.2" height="15.0" fill="rgb(205,129,5)" rx="2" ry="2" />
+<text  x="720.38" y="303.5" ></text>
+</g>
+<g >
+<title>java/lang/String.compareTo (2 samples, 0.01%)</title><rect x="713.7" y="245" width="0.1" height="15.0" fill="rgb(233,41,2)" rx="2" ry="2" />
+<text  x="716.67" y="255.5" ></text>
+</g>
+<g >
+<title>java/io/StringReader.&lt;init&gt; (5 samples, 0.02%)</title><rect x="716.6" y="309" width="0.3" height="15.0" fill="rgb(227,178,21)" rx="2" ry="2" />
+<text  x="719.61" y="319.5" ></text>
+</g>
+<g >
+<title>__psynch_cvwait (3 samples, 0.01%)</title><rect x="1183.7" y="469" width="0.1" height="15.0" fill="rgb(245,56,49)" rx="2" ry="2" />
+<text  x="1186.67" y="479.5" ></text>
+</g>
+<g >
+<title>MemAllocator::finish(HeapWord*) const (3 samples, 0.01%)</title><rect x="736.5" y="117" width="0.2" height="15.0" fill="rgb(227,110,11)" rx="2" ry="2" />
+<text  x="739.53" y="127.5" ></text>
+</g>
+<g >
+<title>CodeCache::find_blob(void*) (2 samples, 0.01%)</title><rect x="1183.3" y="309" width="0.1" height="15.0" fill="rgb(227,47,31)" rx="2" ry="2" />
+<text  x="1186.29" y="319.5" ></text>
+</g>
+<g >
+<title>Threads::possibly_parallel_oops_do(bool, OopClosure*, CodeBlobClosure*) (4 samples, 0.02%)</title><rect x="1186.1" y="485" width="0.2" height="15.0" fill="rgb(241,115,5)" rx="2" ry="2" />
+<text  x="1189.07" y="495.5" ></text>
+</g>
+<g >
+<title>java_lang_Throwable::fill_in_stack_trace(Handle, methodHandle const&amp;) (192 samples, 0.89%)</title><rect x="732.4" y="213" width="10.5" height="15.0" fill="rgb(213,37,29)" rx="2" ry="2" />
+<text  x="735.44" y="223.5" ></text>
+</g>
+<g >
+<title>java/security/Security.getImpl (5 samples, 0.02%)</title><rect x="721.5" y="245" width="0.3" height="15.0" fill="rgb(240,51,15)" rx="2" ry="2" />
+<text  x="724.52" y="255.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/SHA2.implCompress (142 samples, 0.66%)</title><rect x="751.3" y="229" width="7.8" height="15.0" fill="rgb(247,34,21)" rx="2" ry="2" />
+<text  x="754.31" y="239.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.urlSafeDecode (217 samples, 1.00%)</title><rect x="692.4" y="309" width="11.8" height="15.0" fill="rgb(231,165,46)" rx="2" ry="2" />
+<text  x="695.39" y="319.5" ></text>
+</g>
+<g >
+<title>java/lang/String.length (6 samples, 0.03%)</title><rect x="707.6" y="325" width="0.3" height="15.0" fill="rgb(206,15,37)" rx="2" ry="2" />
+<text  x="710.56" y="335.5" ></text>
+</g>
+<g >
+<title>frame::sender_for_compiled_frame(RegisterMap*) const (3 samples, 0.01%)</title><rect x="1183.3" y="325" width="0.2" height="15.0" fill="rgb(248,142,35)" rx="2" ry="2" />
+<text  x="1186.29" y="335.5" ></text>
+</g>
+<g >
+<title>java/lang/String.length (10 samples, 0.05%)</title><rect x="704.3" y="309" width="0.5" height="15.0" fill="rgb(242,127,47)" rx="2" ry="2" />
+<text  x="707.28" y="319.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.engineDigest (98 samples, 0.45%)</title><rect x="744.9" y="261" width="5.4" height="15.0" fill="rgb(212,86,35)" rx="2" ry="2" />
+<text  x="747.93" y="271.5" ></text>
+</g>
+<g >
+<title>CodeCache::find_blob_unsafe(void*) (5 samples, 0.02%)</title><rect x="742.1" y="149" width="0.3" height="15.0" fill="rgb(214,1,4)" rx="2" ry="2" />
+<text  x="745.15" y="159.5" ></text>
+</g>
+<g >
+<title>java/nio/charset/CharsetDecoder.&lt;init&gt; (4 samples, 0.02%)</title><rect x="691.4" y="277" width="0.2" height="15.0" fill="rgb(231,204,38)" rx="2" ry="2" />
+<text  x="694.35" y="287.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.compareMagnitude (3 samples, 0.01%)</title><rect x="769.0" y="309" width="0.2" height="15.0" fill="rgb(226,4,52)" rx="2" ry="2" />
+<text  x="771.99" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.find (2 samples, 0.01%)</title><rect x="715.5" y="229" width="0.1" height="15.0" fill="rgb(246,29,38)" rx="2" ry="2" />
+<text  x="718.52" y="239.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.&lt;init&gt; (3 samples, 0.01%)</title><rect x="955.4" y="213" width="0.1" height="15.0" fill="rgb(227,0,18)" rx="2" ry="2" />
+<text  x="958.35" y="223.5" ></text>
+</g>
+<g >
+<title>java/lang/String.&lt;init&gt; (8 samples, 0.04%)</title><rect x="691.6" y="325" width="0.4" height="15.0" fill="rgb(247,118,26)" rx="2" ry="2" />
+<text  x="694.57" y="335.5" ></text>
+</g>
+<g >
+<title>java/security/MessageDigest.getInstance (56 samples, 0.26%)</title><rect x="718.5" y="277" width="3.0" height="15.0" fill="rgb(219,48,38)" rx="2" ry="2" />
+<text  x="721.47" y="287.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LazilyParsedNumber.doubleValue (7 samples, 0.03%)</title><rect x="717.8" y="293" width="0.3" height="15.0" fill="rgb(225,220,12)" rx="2" ry="2" />
+<text  x="720.76" y="303.5" ></text>
+</g>
+<g >
+<title>JavaThread::pd_last_frame() (2 samples, 0.01%)</title><rect x="679.9" y="341" width="0.1" height="15.0" fill="rgb(224,62,7)" rx="2" ry="2" />
+<text  x="682.90" y="351.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/Streams.parse (18 samples, 0.08%)</title><rect x="715.5" y="309" width="1.0" height="15.0" fill="rgb(223,205,52)" rx="2" ry="2" />
+<text  x="718.47" y="319.5" ></text>
+</g>
+<g >
+<title>java/lang/String.getBytes (144 samples, 0.67%)</title><rect x="696.4" y="277" width="7.8" height="15.0" fill="rgb(217,208,32)" rx="2" ry="2" />
+<text  x="699.37" y="287.5" ></text>
+</g>
+<g >
+<title>SemaphoreGangTaskDispatcher::worker_wait_for_task() (18 samples, 0.08%)</title><rect x="1186.4" y="549" width="1.0" height="15.0" fill="rgb(232,211,17)" rx="2" ry="2" />
+<text  x="1189.40" y="559.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.&lt;init&gt; (5 samples, 0.02%)</title><rect x="955.1" y="229" width="0.3" height="15.0" fill="rgb(224,216,13)" rx="2" ry="2" />
+<text  x="958.08" y="239.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.primitiveLeftShift (7 samples, 0.03%)</title><rect x="1174.2" y="197" width="0.4" height="15.0" fill="rgb(241,94,11)" rx="2" ry="2" />
+<text  x="1177.18" y="207.5" ></text>
+</g>
+<g >
+<title>G1FreeCollectionSetTask::work(unsigned int) (3 samples, 0.01%)</title><rect x="1183.8" y="533" width="0.2" height="15.0" fill="rgb(242,148,19)" rx="2" ry="2" />
+<text  x="1186.84" y="543.5" ></text>
+</g>
+<g >
+<title>MemAllocator::allocate() const (28 samples, 0.13%)</title><rect x="735.4" y="133" width="1.5" height="15.0" fill="rgb(231,12,19)" rx="2" ry="2" />
+<text  x="738.38" y="143.5" ></text>
+</g>
+<g >
+<title>java/nio/Buffer.&lt;init&gt; (3 samples, 0.01%)</title><rect x="684.7" y="245" width="0.2" height="15.0" fill="rgb(205,46,22)" rx="2" ry="2" />
+<text  x="687.70" y="255.5" ></text>
+</g>
+<g >
+<title>AccessInternal::PostRuntimeDispatch&lt;G1BarrierSet::AccessBarrier&lt;1097844ull, G1BarrierSet&gt;, (AccessInternal::BarrierType)2, 1097844ull&gt;::oop_access_barrier(void*) (2 samples, 0.01%)</title><rect x="738.2" y="165" width="0.1" height="15.0" fill="rgb(250,99,39)" rx="2" ry="2" />
+<text  x="741.22" y="175.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.get (5 samples, 0.02%)</title><rect x="716.9" y="293" width="0.3" height="15.0" fill="rgb(207,59,50)" rx="2" ry="2" />
+<text  x="719.89" y="303.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/EngineWrapper$TMessageDigest.getInstance (5 samples, 0.02%)</title><rect x="721.5" y="277" width="0.3" height="15.0" fill="rgb(205,92,35)" rx="2" ry="2" />
+<text  x="724.52" y="287.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JsonUtil.parseJson (23 samples, 0.11%)</title><rect x="680.6" y="357" width="1.3" height="15.0" fill="rgb(243,22,49)" rx="2" ry="2" />
+<text  x="683.61" y="367.5" ></text>
+</g>
+<g >
+<title>JVM_FillInStackTrace (229 samples, 1.06%)</title><rect x="732.2" y="229" width="12.5" height="15.0" fill="rgb(254,152,45)" rx="2" ry="2" />
+<text  x="735.16" y="239.5" ></text>
+</g>
+<g >
+<title>Monitor::wait(bool, long, bool) (3 samples, 0.01%)</title><rect x="1183.7" y="517" width="0.1" height="15.0" fill="rgb(226,3,21)" rx="2" ry="2" />
+<text  x="1186.67" y="527.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.engineDigest (99 samples, 0.46%)</title><rect x="744.9" y="277" width="5.4" height="15.0" fill="rgb(210,65,4)" rx="2" ry="2" />
+<text  x="747.87" y="287.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.decode (217 samples, 1.00%)</title><rect x="692.4" y="293" width="11.8" height="15.0" fill="rgb(246,58,8)" rx="2" ry="2" />
+<text  x="695.39" y="303.5" ></text>
+</g>
+<g >
+<title>__psynch_cvwait (3 samples, 0.01%)</title><rect x="1168.9" y="37" width="0.2" height="15.0" fill="rgb(241,79,10)" rx="2" ry="2" />
+<text  x="1171.94" y="47.5" ></text>
+</g>
+<g >
+<title>AbstractGangWorker::~AbstractGangWorker() (2 samples, 0.01%)</title><rect x="10.0" y="597" width="0.1" height="15.0" fill="rgb(248,202,27)" rx="2" ry="2" />
+<text  x="13.00" y="607.5" ></text>
+</g>
+<g >
+<title>Monitor::ILock(Thread*) (4 samples, 0.02%)</title><rect x="773.3" y="213" width="0.2" height="15.0" fill="rgb(212,8,54)" rx="2" ry="2" />
+<text  x="776.30" y="223.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/EngineWrapper$TMessageDigest.getInstance (5 samples, 0.02%)</title><rect x="721.5" y="293" width="0.3" height="15.0" fill="rgb(252,229,43)" rx="2" ry="2" />
+<text  x="724.52" y="303.5" ></text>
+</g>
+<g >
+<title>SafepointBlob (3 samples, 0.01%)</title><rect x="984.7" y="149" width="0.2" height="15.0" fill="rgb(227,198,24)" rx="2" ry="2" />
+<text  x="987.70" y="159.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.decode (11 samples, 0.05%)</title><rect x="686.9" y="277" width="0.6" height="15.0" fill="rgb(222,131,30)" rx="2" ry="2" />
+<text  x="689.94" y="287.5" ></text>
+</g>
+<g >
+<title>mulAdd (2,865 samples, 13.25%)</title><rect x="775.2" y="277" width="156.3" height="15.0" fill="rgb(248,94,34)" rx="2" ry="2" />
+<text  x="778.21" y="287.5" >mulAdd</text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.urlSafeDecode (11 samples, 0.05%)</title><rect x="686.9" y="309" width="0.6" height="15.0" fill="rgb(214,38,40)" rx="2" ry="2" />
+<text  x="689.94" y="319.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.add (24 samples, 0.11%)</title><rect x="936.4" y="261" width="1.3" height="15.0" fill="rgb(247,198,16)" rx="2" ry="2" />
+<text  x="939.42" y="271.5" ></text>
+</g>
+<g >
+<title>SafepointBlob (2 samples, 0.01%)</title><rect x="935.1" y="261" width="0.1" height="15.0" fill="rgb(235,220,19)" rx="2" ry="2" />
+<text  x="938.11" y="271.5" ></text>
+</g>
+<g >
+<title>jdk/internal/misc/VM.getNanoTimeAdjustment (19 samples, 0.09%)</title><rect x="714.3" y="309" width="1.1" height="15.0" fill="rgb(227,204,40)" rx="2" ry="2" />
+<text  x="717.32" y="319.5" ></text>
+</g>
+<g >
+<title>java/security/Security.getImpl (55 samples, 0.25%)</title><rect x="718.5" y="261" width="3.0" height="15.0" fill="rgb(254,133,3)" rx="2" ry="2" />
+<text  x="721.52" y="271.5" ></text>
+</g>
+<g >
+<title>java/nio/ByteBuffer.&lt;init&gt; (3 samples, 0.01%)</title><rect x="684.7" y="261" width="0.2" height="15.0" fill="rgb(246,6,54)" rx="2" ry="2" />
+<text  x="687.70" y="271.5" ></text>
+</g>
+<g >
+<title>java/security/MessageDigest.getInstance (5 samples, 0.02%)</title><rect x="721.5" y="261" width="0.3" height="15.0" fill="rgb(218,160,31)" rx="2" ry="2" />
+<text  x="724.52" y="271.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.findByObject (2 samples, 0.01%)</title><rect x="714.2" y="277" width="0.1" height="15.0" fill="rgb(244,226,15)" rx="2" ry="2" />
+<text  x="717.21" y="287.5" ></text>
+</g>
+<g >
+<title>_pthread_start (116 samples, 0.54%)</title><rect x="1183.7" y="613" width="6.3" height="15.0" fill="rgb(210,217,6)" rx="2" ry="2" />
+<text  x="1186.67" y="623.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.engineReset (7 samples, 0.03%)</title><rect x="750.8" y="261" width="0.4" height="15.0" fill="rgb(213,47,13)" rx="2" ry="2" />
+<text  x="753.82" y="271.5" ></text>
+</g>
+<g >
+<title>java/lang/String.charAt (62 samples, 0.29%)</title><rect x="687.5" y="309" width="3.4" height="15.0" fill="rgb(251,55,46)" rx="2" ry="2" />
+<text  x="690.54" y="319.5" ></text>
+</g>
+<g >
+<title>PhaseChaitin::Split(unsigned int, ResourceArea*) (2 samples, 0.01%)</title><rect x="1187.6" y="437" width="0.1" height="15.0" fill="rgb(216,120,14)" rx="2" ry="2" />
+<text  x="1190.60" y="447.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.findByObject (5 samples, 0.02%)</title><rect x="716.9" y="277" width="0.3" height="15.0" fill="rgb(240,188,21)" rx="2" ry="2" />
+<text  x="719.89" y="287.5" ></text>
+</g>
+<g >
+<title>sun/security/jca/GetInstance.getInstance (44 samples, 0.20%)</title><rect x="718.6" y="229" width="2.4" height="15.0" fill="rgb(254,14,43)" rx="2" ry="2" />
+<text  x="721.63" y="239.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.divideAndRemainderBurnikelZiegler (4,513 samples, 20.87%)</title><rect x="934.7" y="277" width="246.2" height="15.0" fill="rgb(208,129,35)" rx="2" ry="2" />
+<text  x="937.68" y="287.5" >java/math/MutableBigInteger.divi..</text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.divide3n2n (5 samples, 0.02%)</title><rect x="960.5" y="213" width="0.3" height="15.0" fill="rgb(207,88,47)" rx="2" ry="2" />
+<text  x="963.48" y="223.5" ></text>
+</g>
+<g >
+<title>java/lang/String.length (5 samples, 0.02%)</title><rect x="716.6" y="293" width="0.3" height="15.0" fill="rgb(234,207,51)" rx="2" ry="2" />
+<text  x="719.61" y="303.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/RawJwt.validateStringClaim (8 samples, 0.04%)</title><rect x="716.9" y="325" width="0.4" height="15.0" fill="rgb(214,75,51)" rx="2" ry="2" />
+<text  x="719.89" y="335.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/SHA2.implCompress0 (139 samples, 0.64%)</title><rect x="751.4" y="213" width="7.6" height="15.0" fill="rgb(215,85,23)" rx="2" ry="2" />
+<text  x="754.37" y="223.5" ></text>
+</g>
+<g >
+<title>com/google/gson/JsonPrimitive.getAsDouble (7 samples, 0.03%)</title><rect x="717.8" y="309" width="0.3" height="15.0" fill="rgb(231,183,7)" rx="2" ry="2" />
+<text  x="720.76" y="319.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.toBigInteger (8 samples, 0.04%)</title><rect x="1179.4" y="229" width="0.4" height="15.0" fill="rgb(210,53,48)" rx="2" ry="2" />
+<text  x="1182.36" y="239.5" ></text>
+</g>
+<g >
+<title>sun/nio/cs/UTF_8$Decoder.decodeArrayLoop (7 samples, 0.03%)</title><rect x="691.0" y="261" width="0.4" height="15.0" fill="rgb(253,48,48)" rx="2" ry="2" />
+<text  x="693.97" y="271.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.getMagnitudeArray (6 samples, 0.03%)</title><rect x="1179.5" y="197" width="0.3" height="15.0" fill="rgb(246,139,18)" rx="2" ry="2" />
+<text  x="1182.47" y="207.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/RawJwt.getInstant (3 samples, 0.01%)</title><rect x="714.0" y="309" width="0.2" height="15.0" fill="rgb(242,9,17)" rx="2" ry="2" />
+<text  x="717.00" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.decode (5 samples, 0.02%)</title><rect x="684.4" y="293" width="0.3" height="15.0" fill="rgb(241,21,32)" rx="2" ry="2" />
+<text  x="687.43" y="303.5" ></text>
+</g>
+<g >
+<title>sun/nio/cs/UTF_8$Decoder.&lt;init&gt; (3 samples, 0.01%)</title><rect x="685.4" y="293" width="0.2" height="15.0" fill="rgb(234,180,29)" rx="2" ry="2" />
+<text  x="688.41" y="303.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.engineUpdate (4 samples, 0.02%)</title><rect x="745.7" y="229" width="0.2" height="15.0" fill="rgb(232,214,12)" rx="2" ry="2" />
+<text  x="748.69" y="239.5" ></text>
+</g>
+<g >
+<title>org/openjdk/jmh/runner/ForkedRunner.run (2 samples, 0.01%)</title><rect x="1183.6" y="613" width="0.1" height="15.0" fill="rgb(236,83,29)" rx="2" ry="2" />
+<text  x="1186.56" y="623.5" ></text>
+</g>
+<g >
+<title>Monitor::ILock(Thread*) (5 samples, 0.02%)</title><rect x="770.6" y="229" width="0.2" height="15.0" fill="rgb(235,9,41)" rx="2" ry="2" />
+<text  x="773.57" y="239.5" ></text>
+</g>
+<g >
+<title>CodeCache::find_blob(void*) (2 samples, 0.01%)</title><rect x="1182.7" y="309" width="0.1" height="15.0" fill="rgb(227,67,44)" rx="2" ry="2" />
+<text  x="1185.69" y="319.5" ></text>
+</g>
+<g >
+<title>java/lang/String.indexOf (15 samples, 0.07%)</title><rect x="706.1" y="325" width="0.8" height="15.0" fill="rgb(238,17,2)" rx="2" ry="2" />
+<text  x="709.08" y="335.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.unsignedLongCompare (57 samples, 0.26%)</title><rect x="1169.8" y="165" width="3.1" height="15.0" fill="rgb(211,158,10)" rx="2" ry="2" />
+<text  x="1172.76" y="175.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/SHA2.implDigest (168 samples, 0.78%)</title><rect x="722.0" y="245" width="9.2" height="15.0" fill="rgb(217,138,37)" rx="2" ry="2" />
+<text  x="725.02" y="255.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/EngineFactory.getInstance (56 samples, 0.26%)</title><rect x="718.5" y="325" width="3.0" height="15.0" fill="rgb(219,143,1)" rx="2" ry="2" />
+<text  x="721.47" y="335.5" ></text>
+</g>
+<g >
+<title>os::PlatformEvent::park(long) (3 samples, 0.01%)</title><rect x="1183.7" y="485" width="0.1" height="15.0" fill="rgb(249,180,12)" rx="2" ry="2" />
+<text  x="1186.67" y="495.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.get (3 samples, 0.01%)</title><rect x="713.6" y="309" width="0.2" height="15.0" fill="rgb(241,74,49)" rx="2" ry="2" />
+<text  x="716.61" y="319.5" ></text>
+</g>
+<g >
+<title>java/util/ArrayList.iterator (2 samples, 0.01%)</title><rect x="721.8" y="293" width="0.1" height="15.0" fill="rgb(207,32,54)" rx="2" ry="2" />
+<text  x="724.80" y="303.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.decode (11 samples, 0.05%)</title><rect x="686.9" y="293" width="0.6" height="15.0" fill="rgb(213,122,2)" rx="2" ry="2" />
+<text  x="689.94" y="303.5" ></text>
+</g>
+<g >
+<title>java/lang/StringCoding.decode (8 samples, 0.04%)</title><rect x="691.6" y="293" width="0.4" height="15.0" fill="rgb(228,62,9)" rx="2" ry="2" />
+<text  x="694.57" y="303.5" ></text>
+</g>
+<g >
+<title>java/time/Clock$SystemClock.instant (19 samples, 0.09%)</title><rect x="714.3" y="325" width="1.1" height="15.0" fill="rgb(252,43,2)" rx="2" ry="2" />
+<text  x="717.32" y="335.5" ></text>
+</g>
+<g >
+<title>Compile::Compile(ciEnv*, C2Compiler*, ciMethod*, int, bool, bool, bool, bool, DirectiveSet*) (14 samples, 0.06%)</title><rect x="1187.4" y="485" width="0.7" height="15.0" fill="rgb(236,20,2)" rx="2" ry="2" />
+<text  x="1190.38" y="495.5" ></text>
+</g>
+<g >
+<title>java/util/Arrays.copyOfRange (6 samples, 0.03%)</title><rect x="1179.5" y="181" width="0.3" height="15.0" fill="rgb(224,68,13)" rx="2" ry="2" />
+<text  x="1182.47" y="191.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.encode (10 samples, 0.05%)</title><rect x="678.6" y="309" width="0.5" height="15.0" fill="rgb(209,220,17)" rx="2" ry="2" />
+<text  x="681.59" y="319.5" ></text>
+</g>
+<g >
+<title>java/nio/ByteBuffer.wrap (3 samples, 0.01%)</title><rect x="684.7" y="293" width="0.2" height="15.0" fill="rgb(235,183,51)" rx="2" ry="2" />
+<text  x="687.70" y="303.5" ></text>
+</g>
+<g >
+<title>jdk/internal/reflect/NativeMethodAccessorImpl.invoke0 (9,264 samples, 42.83%)</title><rect x="678.2" y="453" width="505.4" height="15.0" fill="rgb(225,95,11)" rx="2" ry="2" />
+<text  x="681.15" y="463.5" >jdk/internal/reflect/NativeMethodAccessorImpl.invoke0</text>
+</g>
+<g >
+<title>os::PlatformEvent::park() (5 samples, 0.02%)</title><rect x="770.6" y="213" width="0.2" height="15.0" fill="rgb(217,48,6)" rx="2" ry="2" />
+<text  x="773.57" y="223.5" ></text>
+</g>
+<g >
+<title>BacktraceBuilder::expand(Thread*) (39 samples, 0.18%)</title><rect x="735.2" y="165" width="2.1" height="15.0" fill="rgb(226,65,51)" rx="2" ry="2" />
+<text  x="738.22" y="175.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.compare (5 samples, 0.02%)</title><rect x="1179.0" y="213" width="0.3" height="15.0" fill="rgb(213,85,38)" rx="2" ry="2" />
+<text  x="1182.03" y="223.5" ></text>
+</g>
+<g >
+<title>java/lang/reflect/AccessibleObject.slowVerifyAccess (18 samples, 0.08%)</title><rect x="719.7" y="133" width="1.0" height="15.0" fill="rgb(253,177,0)" rx="2" ry="2" />
+<text  x="722.67" y="143.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.subtract (84 samples, 0.39%)</title><rect x="1174.8" y="229" width="4.6" height="15.0" fill="rgb(248,211,48)" rx="2" ry="2" />
+<text  x="1177.78" y="239.5" ></text>
+</g>
+<g >
+<title>java/security/Security.getSpiClass (2 samples, 0.01%)</title><rect x="718.5" y="245" width="0.1" height="15.0" fill="rgb(229,168,26)" rx="2" ry="2" />
+<text  x="721.52" y="255.5" ></text>
+</g>
+<g >
+<title>pthread_jit_write_protect_np (30 samples, 0.14%)</title><rect x="743.0" y="213" width="1.7" height="15.0" fill="rgb(224,152,46)" rx="2" ry="2" />
+<text  x="746.02" y="223.5" ></text>
+</g>
+<g >
+<title>java/util/Objects.requireNonNull (2 samples, 0.01%)</title><rect x="731.0" y="197" width="0.1" height="15.0" fill="rgb(232,175,6)" rx="2" ry="2" />
+<text  x="733.96" y="207.5" ></text>
+</g>
+<g >
+<title>zero_blocks (2 samples, 0.01%)</title><rect x="685.6" y="277" width="0.1" height="15.0" fill="rgb(251,199,22)" rx="2" ry="2" />
+<text  x="688.57" y="287.5" ></text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.nextNonWhitespace (2 samples, 0.01%)</title><rect x="716.3" y="261" width="0.2" height="15.0" fill="rgb(236,164,40)" rx="2" ry="2" />
+<text  x="719.34" y="271.5" ></text>
+</g>
+<g >
+<title>java/lang/StringCoding.encode (144 samples, 0.67%)</title><rect x="696.4" y="261" width="7.8" height="15.0" fill="rgb(216,3,17)" rx="2" ry="2" />
+<text  x="699.37" y="271.5" ></text>
+</g>
+<g >
+<title>CompileBroker::invoke_compiler_on_method(CompileTask*) (15 samples, 0.07%)</title><rect x="1187.4" y="517" width="0.8" height="15.0" fill="rgb(243,147,42)" rx="2" ry="2" />
+<text  x="1190.38" y="527.5" ></text>
+</g>
+<g >
+<title>java/lang/String.compareTo (3 samples, 0.01%)</title><rect x="717.0" y="245" width="0.2" height="15.0" fill="rgb(251,176,10)" rx="2" ry="2" />
+<text  x="720.00" y="255.5" ></text>
+</g>
+<g >
+<title>java/security/Provider.getService (7 samples, 0.03%)</title><rect x="721.0" y="213" width="0.4" height="15.0" fill="rgb(224,55,47)" rx="2" ry="2" />
+<text  x="724.03" y="223.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.urlSafeDecode (5 samples, 0.02%)</title><rect x="684.4" y="309" width="0.3" height="15.0" fill="rgb(228,28,49)" rx="2" ry="2" />
+<text  x="687.43" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.findByObject (4 samples, 0.02%)</title><rect x="717.4" y="277" width="0.2" height="15.0" fill="rgb(230,95,50)" rx="2" ry="2" />
+<text  x="720.38" y="287.5" ></text>
+</g>
+<g >
+<title>frame::sender_for_entry_frame(RegisterMap*) const (2 samples, 0.01%)</title><rect x="741.7" y="181" width="0.1" height="15.0" fill="rgb(247,157,1)" rx="2" ry="2" />
+<text  x="744.66" y="191.5" ></text>
+</g>
+<g >
+<title>sun/security/jca/GetInstance.getInstance (53 samples, 0.25%)</title><rect x="718.6" y="245" width="2.9" height="15.0" fill="rgb(214,46,37)" rx="2" ry="2" />
+<text  x="721.63" y="255.5" ></text>
+</g>
+<g >
+<title>java/lang/Throwable.fillInStackTrace (235 samples, 1.09%)</title><rect x="731.9" y="261" width="12.8" height="15.0" fill="rgb(219,229,25)" rx="2" ry="2" />
+<text  x="734.89" y="271.5" ></text>
+</g>
+<g >
+<title>frame::sender_for_interpreter_frame(RegisterMap*) const (17 samples, 0.08%)</title><rect x="741.8" y="181" width="0.9" height="15.0" fill="rgb(231,47,54)" rx="2" ry="2" />
+<text  x="744.76" y="191.5" ></text>
+</g>
+<g >
+<title>CodeHeap::find_blob_unsafe(void*) const (6 samples, 0.03%)</title><rect x="741.2" y="149" width="0.3" height="15.0" fill="rgb(209,150,22)" rx="2" ry="2" />
+<text  x="744.22" y="159.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.&lt;init&gt; (22 samples, 0.10%)</title><rect x="935.2" y="261" width="1.2" height="15.0" fill="rgb(252,133,37)" rx="2" ry="2" />
+<text  x="938.22" y="271.5" ></text>
+</g>
+<g >
+<title>sun/nio/cs/UTF_8$Decoder.&lt;init&gt; (4 samples, 0.02%)</title><rect x="691.4" y="293" width="0.2" height="15.0" fill="rgb(254,5,3)" rx="2" ry="2" />
+<text  x="694.35" y="303.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.implCompressMultiBlock (145 samples, 0.67%)</title><rect x="751.2" y="261" width="7.9" height="15.0" fill="rgb(210,152,25)" rx="2" ry="2" />
+<text  x="754.20" y="271.5" ></text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.doPeek (2 samples, 0.01%)</title><rect x="681.2" y="277" width="0.1" height="15.0" fill="rgb(232,112,14)" rx="2" ry="2" />
+<text  x="684.21" y="287.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/Streams.parse (17 samples, 0.08%)</title><rect x="680.7" y="341" width="0.9" height="15.0" fill="rgb(210,62,6)" rx="2" ry="2" />
+<text  x="683.66" y="351.5" ></text>
+</g>
+<g >
+<title>org/openjdk/jmh/runner/BenchmarkHandler.runIteration (2 samples, 0.01%)</title><rect x="1183.6" y="533" width="0.1" height="15.0" fill="rgb(227,39,35)" rx="2" ry="2" />
+<text  x="1186.56" y="543.5" ></text>
+</g>
+<g >
+<title>G1EvacPhaseWithTrimTimeTracker::~G1EvacPhaseWithTrimTimeTracker() (2 samples, 0.01%)</title><rect x="1185.6" y="469" width="0.1" height="15.0" fill="rgb(214,72,35)" rx="2" ry="2" />
+<text  x="1188.64" y="479.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.divide (4,513 samples, 20.87%)</title><rect x="934.7" y="309" width="246.2" height="15.0" fill="rgb(233,196,17)" rx="2" ry="2" />
+<text  x="937.68" y="319.5" >java/math/MutableBigInteger.divide</text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.validateUtf8 (16 samples, 0.07%)</title><rect x="684.7" y="325" width="0.9" height="15.0" fill="rgb(215,68,33)" rx="2" ry="2" />
+<text  x="687.70" y="335.5" ></text>
+</g>
+<g >
+<title>SafepointSynchronize::handle_polling_page_exception(JavaThread*) (3 samples, 0.01%)</title><rect x="1168.9" y="149" width="0.2" height="15.0" fill="rgb(245,64,28)" rx="2" ry="2" />
+<text  x="1171.94" y="159.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.compareTo (3 samples, 0.01%)</title><rect x="769.0" y="325" width="0.2" height="15.0" fill="rgb(231,181,22)" rx="2" ry="2" />
+<text  x="771.99" y="335.5" ></text>
+</g>
+<g >
+<title>SafepointSynchronize::handle_polling_page_exception(JavaThread*) (6 samples, 0.03%)</title><rect x="770.5" y="309" width="0.3" height="15.0" fill="rgb(219,67,31)" rx="2" ry="2" />
+<text  x="773.52" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/EngineWrapper$TMessageDigest.getInstance (56 samples, 0.26%)</title><rect x="718.5" y="309" width="3.0" height="15.0" fill="rgb(245,193,5)" rx="2" ry="2" />
+<text  x="721.47" y="319.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.urlSafeEncode (12 samples, 0.06%)</title><rect x="678.5" y="357" width="0.7" height="15.0" fill="rgb(254,84,11)" rx="2" ry="2" />
+<text  x="681.53" y="367.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.isValidUrlsafeBase64Char (41 samples, 0.19%)</title><rect x="682.2" y="309" width="2.2" height="15.0" fill="rgb(254,194,49)" rx="2" ry="2" />
+<text  x="685.19" y="319.5" ></text>
+</g>
+<g >
+<title>java/util/Arrays.copyOfRange (2 samples, 0.01%)</title><rect x="960.6" y="181" width="0.1" height="15.0" fill="rgb(232,90,7)" rx="2" ry="2" />
+<text  x="963.59" y="191.5" ></text>
+</g>
+<g >
+<title>Monitor::IWait(Thread*, long) (2 samples, 0.01%)</title><rect x="1188.3" y="485" width="0.1" height="15.0" fill="rgb(234,207,49)" rx="2" ry="2" />
+<text  x="1191.25" y="495.5" ></text>
+</g>
+<g >
+<title>arrayof_jlong_disjoint_arraycopy (2 samples, 0.01%)</title><rect x="709.4" y="309" width="0.1" height="15.0" fill="rgb(207,2,47)" rx="2" ry="2" />
+<text  x="712.36" y="319.5" ></text>
+</g>
+<g >
+<title>G1CollectedHeap::do_collection_pause_at_safepoint(double) (5 samples, 0.02%)</title><rect x="1188.7" y="485" width="0.3" height="15.0" fill="rgb(253,128,1)" rx="2" ry="2" />
+<text  x="1191.75" y="495.5" ></text>
+</g>
+<g >
+<title>org/openjdk/jmh/runner/BenchmarkHandler.stopProfilers (2 samples, 0.01%)</title><rect x="1183.6" y="517" width="0.1" height="15.0" fill="rgb(235,114,36)" rx="2" ry="2" />
+<text  x="1186.56" y="527.5" ></text>
+</g>
+<g >
+<title>jint_arraycopy (3 samples, 0.01%)</title><rect x="938.4" y="229" width="0.2" height="15.0" fill="rgb(242,87,34)" rx="2" ry="2" />
+<text  x="941.44" y="239.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.find (2 samples, 0.01%)</title><rect x="714.2" y="261" width="0.1" height="15.0" fill="rgb(226,105,42)" rx="2" ry="2" />
+<text  x="717.21" y="271.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.decodePayload (107 samples, 0.49%)</title><rect x="686.2" y="341" width="5.8" height="15.0" fill="rgb(243,223,47)" rx="2" ry="2" />
+<text  x="689.17" y="351.5" ></text>
+</g>
+<g >
+<title>java/lang/StringLatin1.indexOf (12 samples, 0.06%)</title><rect x="706.2" y="309" width="0.7" height="15.0" fill="rgb(252,3,43)" rx="2" ry="2" />
+<text  x="709.25" y="319.5" ></text>
+</g>
+<g >
+<title>CodeHeap::find_blob_unsafe(void*) const (4 samples, 0.02%)</title><rect x="742.4" y="149" width="0.2" height="15.0" fill="rgb(233,47,36)" rx="2" ry="2" />
+<text  x="745.42" y="159.5" ></text>
+</g>
+<g >
+<title>thread_native_entry(Thread*) (116 samples, 0.54%)</title><rect x="1183.7" y="597" width="6.3" height="15.0" fill="rgb(231,40,41)" rx="2" ry="2" />
+<text  x="1186.67" y="607.5" ></text>
+</g>
+<g >
+<title>java/lang/StringLatin1.charAt (14 samples, 0.06%)</title><rect x="705.3" y="309" width="0.8" height="15.0" fill="rgb(233,165,15)" rx="2" ry="2" />
+<text  x="708.32" y="319.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.engineUpdate (162 samples, 0.75%)</title><rect x="750.3" y="277" width="8.8" height="15.0" fill="rgb(243,157,23)" rx="2" ry="2" />
+<text  x="753.28" y="287.5" ></text>
+</g>
+<g >
+<title>SafepointSynchronize::handle_polling_page_exception(JavaThread*) (4 samples, 0.02%)</title><rect x="773.3" y="293" width="0.2" height="15.0" fill="rgb(221,186,33)" rx="2" ry="2" />
+<text  x="776.30" y="303.5" ></text>
+</g>
+<g >
+<title>java/lang/Thread.run (9,264 samples, 42.83%)</title><rect x="678.2" y="629" width="505.4" height="15.0" fill="rgb(233,33,3)" rx="2" ry="2" />
+<text  x="681.15" y="639.5" >java/lang/Thread.run</text>
+</g>
+<g >
+<title>com/example/tink/bm/JwtPublicKeyVerifyBenchmark.verifyJwt_signedWith1stKey (3 samples, 0.01%)</title><rect x="678.2" y="421" width="0.1" height="15.0" fill="rgb(220,142,32)" rx="2" ry="2" />
+<text  x="681.15" y="431.5" ></text>
+</g>
+<g >
+<title>java/nio/charset/CharsetDecoder.&lt;init&gt; (3 samples, 0.01%)</title><rect x="685.4" y="261" width="0.2" height="15.0" fill="rgb(228,167,20)" rx="2" ry="2" />
+<text  x="688.41" y="271.5" ></text>
+</g>
+<g >
+<title>java/util/concurrent/FutureTask.run (9,264 samples, 42.83%)</title><rect x="678.2" y="549" width="505.4" height="15.0" fill="rgb(207,48,1)" rx="2" ry="2" />
+<text  x="681.15" y="559.5" >java/util/concurrent/FutureTask.run</text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.nextNonWhitespace (2 samples, 0.01%)</title><rect x="681.2" y="261" width="0.1" height="15.0" fill="rgb(219,218,34)" rx="2" ry="2" />
+<text  x="684.21" y="271.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtValidator.validateIssuer (2 samples, 0.01%)</title><rect x="713.9" y="341" width="0.1" height="15.0" fill="rgb(249,71,29)" rx="2" ry="2" />
+<text  x="716.89" y="351.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.getLowestSetBit (4 samples, 0.02%)</title><rect x="1173.1" y="181" width="0.3" height="15.0" fill="rgb(224,176,29)" rx="2" ry="2" />
+<text  x="1176.14" y="191.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.normalize (12 samples, 0.06%)</title><rect x="1169.1" y="165" width="0.7" height="15.0" fill="rgb(249,5,13)" rx="2" ry="2" />
+<text  x="1172.10" y="175.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.find (3 samples, 0.01%)</title><rect x="713.6" y="277" width="0.2" height="15.0" fill="rgb(253,142,43)" rx="2" ry="2" />
+<text  x="716.61" y="287.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.intArrayCmpToLen (2 samples, 0.01%)</title><rect x="931.5" y="293" width="0.1" height="15.0" fill="rgb(214,95,54)" rx="2" ry="2" />
+<text  x="934.51" y="303.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/SHA2.implCompressCheck (2 samples, 0.01%)</title><rect x="759.0" y="213" width="0.1" height="15.0" fill="rgb(216,162,31)" rx="2" ry="2" />
+<text  x="761.95" y="223.5" ></text>
+</g>
+<g >
+<title>java/security/Provider$Service.newInstance (43 samples, 0.20%)</title><rect x="718.7" y="213" width="2.3" height="15.0" fill="rgb(224,136,39)" rx="2" ry="2" />
+<text  x="721.69" y="223.5" ></text>
+</g>
+<g >
+<title>Java_java_lang_Throwable_fillInStackTrace (231 samples, 1.07%)</title><rect x="732.1" y="245" width="12.6" height="15.0" fill="rgb(254,221,4)" rx="2" ry="2" />
+<text  x="735.05" y="255.5" ></text>
+</g>
+<g >
+<title>java/util/Arrays.copyOf (79 samples, 0.37%)</title><rect x="699.9" y="229" width="4.3" height="15.0" fill="rgb(252,98,10)" rx="2" ry="2" />
+<text  x="702.92" y="239.5" ></text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.peek (2 samples, 0.01%)</title><rect x="715.9" y="245" width="0.1" height="15.0" fill="rgb(252,79,9)" rx="2" ry="2" />
+<text  x="718.85" y="255.5" ></text>
+</g>
+<g >
+<title>java/util/Arrays.copyOfRange (2 samples, 0.01%)</title><rect x="691.9" y="261" width="0.1" height="15.0" fill="rgb(231,64,49)" rx="2" ry="2" />
+<text  x="694.90" y="271.5" ></text>
+</g>
+<g >
+<title>frame::is_interpreted_frame() const (5 samples, 0.02%)</title><rect x="740.2" y="181" width="0.3" height="15.0" fill="rgb(228,203,31)" rx="2" ry="2" />
+<text  x="743.24" y="191.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.toBigInteger (7 samples, 0.03%)</title><rect x="1179.4" y="213" width="0.4" height="15.0" fill="rgb(218,191,7)" rx="2" ry="2" />
+<text  x="1182.42" y="223.5" ></text>
+</g>
+<g >
+<title>OptoRuntime::handle_exception_C(JavaThread*) (19 samples, 0.09%)</title><rect x="679.6" y="357" width="1.0" height="15.0" fill="rgb(227,109,48)" rx="2" ry="2" />
+<text  x="682.57" y="367.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.rightShift (13 samples, 0.06%)</title><rect x="1174.1" y="213" width="0.7" height="15.0" fill="rgb(226,220,38)" rx="2" ry="2" />
+<text  x="1177.07" y="223.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64$Decoder.process (11 samples, 0.05%)</title><rect x="686.9" y="245" width="0.6" height="15.0" fill="rgb(231,5,8)" rx="2" ry="2" />
+<text  x="689.94" y="255.5" ></text>
+</g>
+<g >
+<title>_rethrow_Java (5 samples, 0.02%)</title><rect x="10.0" y="613" width="0.3" height="15.0" fill="rgb(249,217,34)" rx="2" ry="2" />
+<text  x="13.00" y="623.5" ></text>
+</g>
+<g >
+<title>SafepointMechanism::block_if_requested_slow(JavaThread*) (5 samples, 0.02%)</title><rect x="770.6" y="277" width="0.2" height="15.0" fill="rgb(213,108,35)" rx="2" ry="2" />
+<text  x="773.57" y="287.5" ></text>
+</g>
+<g >
+<title>java/util/Arrays.fill (4 samples, 0.02%)</title><rect x="731.3" y="245" width="0.3" height="15.0" fill="rgb(235,154,33)" rx="2" ry="2" />
+<text  x="734.34" y="255.5" ></text>
+</g>
+<g >
+<title>WatcherThread::run() (18 samples, 0.08%)</title><rect x="1189.0" y="565" width="1.0" height="15.0" fill="rgb(217,5,10)" rx="2" ry="2" />
+<text  x="1192.02" y="575.5" ></text>
+</g>
+<g >
+<title>java/lang/String.&lt;init&gt; (11 samples, 0.05%)</title><rect x="685.6" y="325" width="0.6" height="15.0" fill="rgb(241,205,49)" rx="2" ry="2" />
+<text  x="688.57" y="335.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/RawJwt.getIssuer (2 samples, 0.01%)</title><rect x="713.9" y="325" width="0.1" height="15.0" fill="rgb(222,113,35)" rx="2" ry="2" />
+<text  x="716.89" y="335.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.safeRightShift (8 samples, 0.04%)</title><rect x="1179.8" y="245" width="0.4" height="15.0" fill="rgb(233,142,2)" rx="2" ry="2" />
+<text  x="1182.80" y="255.5" ></text>
+</g>
+<g >
+<title>java/lang/StringLatin1.toUpperCase (4 samples, 0.02%)</title><rect x="721.1" y="165" width="0.3" height="15.0" fill="rgb(230,181,9)" rx="2" ry="2" />
+<text  x="724.14" y="175.5" ></text>
+</g>
+<g >
+<title>pthread_jit_write_protect_np (31 samples, 0.14%)</title><rect x="10.7" y="581" width="1.6" height="15.0" fill="rgb(222,99,20)" rx="2" ry="2" />
+<text  x="13.65" y="591.5" ></text>
+</g>
+<g >
+<title>pthread_jit_write_protect_np (11 samples, 0.05%)</title><rect x="763.9" y="245" width="0.6" height="15.0" fill="rgb(241,118,53)" rx="2" ry="2" />
+<text  x="766.86" y="255.5" ></text>
+</g>
+<g >
+<title>zero_blocks (2 samples, 0.01%)</title><rect x="681.8" y="309" width="0.1" height="15.0" fill="rgb(211,62,32)" rx="2" ry="2" />
+<text  x="684.75" y="319.5" ></text>
+</g>
+<g >
+<title>java/lang/String.charAt (14 samples, 0.06%)</title><rect x="705.3" y="325" width="0.8" height="15.0" fill="rgb(233,46,1)" rx="2" ry="2" />
+<text  x="708.32" y="335.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.engineDigest (168 samples, 0.78%)</title><rect x="722.0" y="277" width="9.2" height="15.0" fill="rgb(205,152,46)" rx="2" ry="2" />
+<text  x="725.02" y="287.5" ></text>
+</g>
+<g >
+<title>CodeCache::find_blob_unsafe(void*) (4 samples, 0.02%)</title><rect x="741.0" y="149" width="0.2" height="15.0" fill="rgb(234,189,3)" rx="2" ry="2" />
+<text  x="744.00" y="159.5" ></text>
+</g>
+<g >
+<title>java/lang/String.&lt;init&gt; (11 samples, 0.05%)</title><rect x="709.5" y="309" width="0.6" height="15.0" fill="rgb(254,188,25)" rx="2" ry="2" />
+<text  x="712.52" y="319.5" ></text>
+</g>
+<g >
+<title>java/lang/String.&lt;init&gt; (11 samples, 0.05%)</title><rect x="685.6" y="309" width="0.6" height="15.0" fill="rgb(216,56,6)" rx="2" ry="2" />
+<text  x="688.57" y="319.5" ></text>
+</g>
+<g >
+<title>java/lang/Double.parseDouble (7 samples, 0.03%)</title><rect x="717.8" y="277" width="0.3" height="15.0" fill="rgb(242,216,25)" rx="2" ry="2" />
+<text  x="720.76" y="287.5" ></text>
+</g>
+<g >
+<title>os::PlatformEvent::park(long) (16 samples, 0.07%)</title><rect x="1189.1" y="501" width="0.8" height="15.0" fill="rgb(249,140,31)" rx="2" ry="2" />
+<text  x="1192.07" y="511.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.getTypeHeader (5 samples, 0.02%)</title><rect x="681.9" y="357" width="0.2" height="15.0" fill="rgb(236,228,51)" rx="2" ry="2" />
+<text  x="684.86" y="367.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64$Decoder.process (64 samples, 0.30%)</title><rect x="692.9" y="245" width="3.5" height="15.0" fill="rgb(249,143,43)" rx="2" ry="2" />
+<text  x="695.88" y="255.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.rebalance (2 samples, 0.01%)</title><rect x="715.5" y="213" width="0.1" height="15.0" fill="rgb(226,35,30)" rx="2" ry="2" />
+<text  x="718.52" y="223.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.containsKey (3 samples, 0.01%)</title><rect x="717.6" y="293" width="0.2" height="15.0" fill="rgb(230,87,40)" rx="2" ry="2" />
+<text  x="720.60" y="303.5" ></text>
+</g>
+<g >
+<title>forward_copy_longs (49 samples, 0.23%)</title><rect x="12.4" y="613" width="2.7" height="15.0" fill="rgb(229,46,26)" rx="2" ry="2" />
+<text  x="15.40" y="623.5" ></text>
+</g>
+<g >
+<title>G1RootProcessor::evacuate_roots(G1ParScanThreadState*, unsigned int) (6 samples, 0.03%)</title><rect x="1186.0" y="517" width="0.3" height="15.0" fill="rgb(248,143,17)" rx="2" ry="2" />
+<text  x="1189.02" y="527.5" ></text>
+</g>
+<g >
+<title>JavaThread::thread_main_inner() (19 samples, 0.09%)</title><rect x="1187.4" y="549" width="1.0" height="15.0" fill="rgb(216,173,38)" rx="2" ry="2" />
+<text  x="1190.38" y="559.5" ></text>
+</g>
+<g >
+<title>mach_absolute_time (3 samples, 0.01%)</title><rect x="1185.3" y="421" width="0.1" height="15.0" fill="rgb(238,44,20)" rx="2" ry="2" />
+<text  x="1188.25" y="431.5" ></text>
+</g>
+<g >
+<title>java/util/Arrays.fill (5 samples, 0.02%)</title><rect x="750.8" y="245" width="0.3" height="15.0" fill="rgb(243,129,4)" rx="2" ry="2" />
+<text  x="753.82" y="255.5" ></text>
+</g>
+<g >
+<title>MemAllocator::allocate() const (2 samples, 0.01%)</title><rect x="935.5" y="213" width="0.2" height="15.0" fill="rgb(251,43,43)" rx="2" ry="2" />
+<text  x="938.55" y="223.5" ></text>
+</g>
+<g >
+<title>Monitor::wait(bool, long, bool) (2 samples, 0.01%)</title><rect x="1188.3" y="501" width="0.1" height="15.0" fill="rgb(207,200,4)" rx="2" ry="2" />
+<text  x="1191.25" y="511.5" ></text>
+</g>
+<g >
+<title>os::PlatformEvent::park(long) (2 samples, 0.01%)</title><rect x="1188.3" y="469" width="0.1" height="15.0" fill="rgb(232,23,43)" rx="2" ry="2" />
+<text  x="1191.25" y="479.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.getKid (15 samples, 0.07%)</title><rect x="678.5" y="373" width="0.9" height="15.0" fill="rgb(233,161,52)" rx="2" ry="2" />
+<text  x="681.53" y="383.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtPublicKeyVerifyWrapper$WrappedJwtPublicKeyVerify.verifyAndDecode (9,259 samples, 42.81%)</title><rect x="678.4" y="389" width="505.2" height="15.0" fill="rgb(215,160,40)" rx="2" ry="2" />
+<text  x="681.42" y="399.5" >com/google/crypto/tink/jwt/JwtPublicKeyVerifyWrapper$WrappedJwtPublic..</text>
+</g>
+<g >
+<title>_rethrow_Java (34 samples, 0.16%)</title><rect x="10.5" y="613" width="1.8" height="15.0" fill="rgb(243,74,50)" rx="2" ry="2" />
+<text  x="13.49" y="623.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64$Encoder.process (2 samples, 0.01%)</title><rect x="679.0" y="293" width="0.1" height="15.0" fill="rgb(250,27,53)" rx="2" ry="2" />
+<text  x="682.02" y="303.5" ></text>
+</g>
+<g >
+<title>G1YoungRemSetSamplingThread::run_service() (3 samples, 0.01%)</title><rect x="1183.7" y="549" width="0.1" height="15.0" fill="rgb(248,149,23)" rx="2" ry="2" />
+<text  x="1186.67" y="559.5" ></text>
+</g>
+<g >
+<title>Threads::possibly_parallel_threads_do(bool, ThreadClosure*) (4 samples, 0.02%)</title><rect x="1186.1" y="469" width="0.2" height="15.0" fill="rgb(245,197,39)" rx="2" ry="2" />
+<text  x="1189.07" y="479.5" ></text>
+</g>
+<g >
+<title>Compile::Optimize() (5 samples, 0.02%)</title><rect x="1187.8" y="469" width="0.2" height="15.0" fill="rgb(215,64,21)" rx="2" ry="2" />
+<text  x="1190.76" y="479.5" ></text>
+</g>
+<g >
+<title>MemAllocator::Allocation::notify_allocation_dtrace_sampler() (2 samples, 0.01%)</title><rect x="735.8" y="101" width="0.1" height="15.0" fill="rgb(230,143,45)" rx="2" ry="2" />
+<text  x="738.82" y="111.5" ></text>
+</g>
+<g >
+<title>java/lang/StringCoding.decodeUTF8 (8 samples, 0.04%)</title><rect x="691.6" y="277" width="0.4" height="15.0" fill="rgb(241,219,42)" rx="2" ry="2" />
+<text  x="694.57" y="287.5" ></text>
+</g>
+<g >
+<title>java/security/MessageDigest.update (10 samples, 0.05%)</title><rect x="731.2" y="309" width="0.5" height="15.0" fill="rgb(225,56,16)" rx="2" ry="2" />
+<text  x="734.18" y="319.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.leftShift (13 samples, 0.06%)</title><rect x="1173.4" y="229" width="0.7" height="15.0" fill="rgb(205,183,46)" rx="2" ry="2" />
+<text  x="1176.36" y="239.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.encodeToString (11 samples, 0.05%)</title><rect x="678.6" y="341" width="0.6" height="15.0" fill="rgb(216,136,48)" rx="2" ry="2" />
+<text  x="681.59" y="351.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.&lt;init&gt; (17 samples, 0.08%)</title><rect x="983.9" y="165" width="1.0" height="15.0" fill="rgb(212,192,25)" rx="2" ry="2" />
+<text  x="986.94" y="175.5" ></text>
+</g>
+<g >
+<title>org/openjdk/jmh/runner/BaseRunner.runBenchmark (2 samples, 0.01%)</title><rect x="1183.6" y="565" width="0.1" height="15.0" fill="rgb(230,63,10)" rx="2" ry="2" />
+<text  x="1186.56" y="575.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.oddModPow (7,557 samples, 34.94%)</title><rect x="769.2" y="325" width="412.3" height="15.0" fill="rgb(243,179,50)" rx="2" ry="2" />
+<text  x="772.21" y="335.5" >java/math/BigInteger.oddModPow</text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/RawJwt.hasExpiration (3 samples, 0.01%)</title><rect x="714.2" y="325" width="0.1" height="15.0" fill="rgb(205,91,11)" rx="2" ry="2" />
+<text  x="717.16" y="335.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64$Decoder.process (4 samples, 0.02%)</title><rect x="684.4" y="245" width="0.2" height="15.0" fill="rgb(220,14,49)" rx="2" ry="2" />
+<text  x="687.43" y="255.5" ></text>
+</g>
+<g >
+<title>java/lang/String.checkBoundsOffCount (2 samples, 0.01%)</title><rect x="685.6" y="293" width="0.1" height="15.0" fill="rgb(230,121,0)" rx="2" ry="2" />
+<text  x="688.57" y="303.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.&lt;init&gt; (3 samples, 0.01%)</title><rect x="938.0" y="245" width="0.2" height="15.0" fill="rgb(238,60,52)" rx="2" ry="2" />
+<text  x="941.00" y="255.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/SHA2.implCompress0 (155 samples, 0.72%)</title><rect x="722.5" y="213" width="8.5" height="15.0" fill="rgb(209,101,28)" rx="2" ry="2" />
+<text  x="725.51" y="223.5" ></text>
+</g>
+<g >
+<title>java/util/Arrays.fill (2 samples, 0.01%)</title><rect x="745.3" y="181" width="0.1" height="15.0" fill="rgb(226,210,52)" rx="2" ry="2" />
+<text  x="748.31" y="191.5" ></text>
+</g>
+<g >
+<title>_platform_memset (3 samples, 0.01%)</title><rect x="736.7" y="117" width="0.2" height="15.0" fill="rgb(214,86,31)" rx="2" ry="2" />
+<text  x="739.75" y="127.5" ></text>
+</g>
+<g >
+<title>frame::sender(RegisterMap*) const (5 samples, 0.02%)</title><rect x="740.5" y="181" width="0.3" height="15.0" fill="rgb(216,110,10)" rx="2" ry="2" />
+<text  x="743.51" y="191.5" ></text>
+</g>
+<g >
+<title>G1ScanRSForRegionClosure::scan_rem_set_roots(HeapRegion*) (5 samples, 0.02%)</title><rect x="1185.7" y="469" width="0.3" height="15.0" fill="rgb(239,202,50)" rx="2" ry="2" />
+<text  x="1188.74" y="479.5" ></text>
+</g>
+<g >
+<title>C2Compiler::compile_method(ciEnv*, ciMethod*, int, DirectiveSet*) (14 samples, 0.06%)</title><rect x="1187.4" y="501" width="0.7" height="15.0" fill="rgb(224,127,40)" rx="2" ry="2" />
+<text  x="1190.38" y="511.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/bind/TypeAdapters$27.read (12 samples, 0.06%)</title><rect x="715.5" y="293" width="0.6" height="15.0" fill="rgb(212,119,22)" rx="2" ry="2" />
+<text  x="718.47" y="303.5" ></text>
+</g>
+<g >
+<title>com/google/gson/JsonObject.add (4 samples, 0.02%)</title><rect x="680.7" y="293" width="0.2" height="15.0" fill="rgb(246,167,50)" rx="2" ry="2" />
+<text  x="683.66" y="303.5" ></text>
+</g>
+<g >
+<title>MemAllocator::Allocation::notify_allocation() (11 samples, 0.05%)</title><rect x="735.7" y="117" width="0.6" height="15.0" fill="rgb(245,86,38)" rx="2" ry="2" />
+<text  x="738.65" y="127.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.getInt (7 samples, 0.03%)</title><rect x="768.4" y="309" width="0.4" height="15.0" fill="rgb(224,171,11)" rx="2" ry="2" />
+<text  x="771.39" y="319.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.safeRightShift (13 samples, 0.06%)</title><rect x="1174.1" y="229" width="0.7" height="15.0" fill="rgb(242,28,2)" rx="2" ry="2" />
+<text  x="1177.07" y="239.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.decode (11 samples, 0.05%)</title><rect x="686.9" y="261" width="0.6" height="15.0" fill="rgb(210,16,54)" rx="2" ry="2" />
+<text  x="689.94" y="271.5" ></text>
+</g>
+<g >
+<title>jdk/internal/reflect/DelegatingConstructorAccessorImpl.newInstance (2 samples, 0.01%)</title><rect x="720.7" y="165" width="0.1" height="15.0" fill="rgb(245,38,14)" rx="2" ry="2" />
+<text  x="723.65" y="175.5" ></text>
+</g>
+<g >
+<title>java/lang/String.indexOf (15 samples, 0.07%)</title><rect x="706.1" y="341" width="0.8" height="15.0" fill="rgb(234,75,29)" rx="2" ry="2" />
+<text  x="709.08" y="351.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.implCompressMultiBlock (2 samples, 0.01%)</title><rect x="745.5" y="213" width="0.1" height="15.0" fill="rgb(225,147,6)" rx="2" ry="2" />
+<text  x="748.47" y="223.5" ></text>
+</g>
+<g >
+<title>java/lang/reflect/AccessibleObject.checkAccess (24 samples, 0.11%)</title><rect x="719.3" y="165" width="1.4" height="15.0" fill="rgb(217,66,46)" rx="2" ry="2" />
+<text  x="722.34" y="175.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.find (2 samples, 0.01%)</title><rect x="717.7" y="261" width="0.1" height="15.0" fill="rgb(239,165,50)" rx="2" ry="2" />
+<text  x="720.65" y="271.5" ></text>
+</g>
+<g >
+<title>java/util/concurrent/ThreadPoolExecutor$Worker.run (9,264 samples, 42.83%)</title><rect x="678.2" y="613" width="505.4" height="15.0" fill="rgb(243,1,2)" rx="2" ry="2" />
+<text  x="681.15" y="623.5" >java/util/concurrent/ThreadPoolExecutor$Worker.run</text>
+</g>
+<g >
+<title>arrayof_jlong_disjoint_arraycopy (4 samples, 0.02%)</title><rect x="955.1" y="213" width="0.2" height="15.0" fill="rgb(251,179,38)" rx="2" ry="2" />
+<text  x="958.08" y="223.5" ></text>
+</g>
+<g >
+<title>gettimeofday (6 samples, 0.03%)</title><rect x="714.5" y="261" width="0.3" height="15.0" fill="rgb(237,121,21)" rx="2" ry="2" />
+<text  x="717.49" y="271.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.getStringHeader (3 samples, 0.01%)</title><rect x="681.9" y="341" width="0.2" height="15.0" fill="rgb(224,116,0)" rx="2" ry="2" />
+<text  x="684.92" y="351.5" ></text>
+</g>
+<g >
+<title>sun/nio/cs/UTF_8.newDecoder (3 samples, 0.01%)</title><rect x="685.4" y="309" width="0.2" height="15.0" fill="rgb(207,126,14)" rx="2" ry="2" />
+<text  x="688.41" y="319.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.&lt;init&gt; (105 samples, 0.49%)</title><rect x="759.1" y="325" width="5.7" height="15.0" fill="rgb(242,110,52)" rx="2" ry="2" />
+<text  x="762.11" y="335.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/SHA2.implCompress (161 samples, 0.74%)</title><rect x="722.4" y="229" width="8.8" height="15.0" fill="rgb(210,121,41)" rx="2" ry="2" />
+<text  x="725.40" y="239.5" ></text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.doPeek (6 samples, 0.03%)</title><rect x="716.1" y="277" width="0.4" height="15.0" fill="rgb(247,138,30)" rx="2" ry="2" />
+<text  x="719.12" y="287.5" ></text>
+</g>
+<g >
+<title>java/lang/Throwable.fillInStackTrace (235 samples, 1.09%)</title><rect x="731.9" y="277" width="12.8" height="15.0" fill="rgb(222,10,3)" rx="2" ry="2" />
+<text  x="734.89" y="287.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64$Encoder.&lt;init&gt; (4 samples, 0.02%)</title><rect x="678.8" y="293" width="0.2" height="15.0" fill="rgb(220,68,51)" rx="2" ry="2" />
+<text  x="681.81" y="303.5" ></text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.doPeek (2 samples, 0.01%)</title><rect x="715.9" y="229" width="0.1" height="15.0" fill="rgb(228,9,29)" rx="2" ry="2" />
+<text  x="718.85" y="239.5" ></text>
+</g>
+<g >
+<title>zero_blocks (3 samples, 0.01%)</title><rect x="716.7" y="277" width="0.2" height="15.0" fill="rgb(227,119,36)" rx="2" ry="2" />
+<text  x="719.72" y="287.5" ></text>
+</g>
+<g >
+<title>java/lang/String.compareTo (2 samples, 0.01%)</title><rect x="713.7" y="261" width="0.1" height="15.0" fill="rgb(213,145,27)" rx="2" ry="2" />
+<text  x="716.67" y="271.5" ></text>
+</g>
+<g >
+<title>java/nio/Buffer.&lt;init&gt; (2 samples, 0.01%)</title><rect x="679.2" y="309" width="0.1" height="15.0" fill="rgb(222,20,25)" rx="2" ry="2" />
+<text  x="682.19" y="319.5" ></text>
+</g>
+<g >
+<title>PhaseChaitin::Register_Allocate() (4 samples, 0.02%)</title><rect x="1187.5" y="453" width="0.3" height="15.0" fill="rgb(242,60,34)" rx="2" ry="2" />
+<text  x="1190.54" y="463.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.find (5 samples, 0.02%)</title><rect x="716.9" y="261" width="0.3" height="15.0" fill="rgb(236,211,36)" rx="2" ry="2" />
+<text  x="719.89" y="271.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.montReduce (2,981 samples, 13.78%)</title><rect x="771.1" y="309" width="162.6" height="15.0" fill="rgb(226,72,30)" rx="2" ry="2" />
+<text  x="774.06" y="319.5" >java/math/BigInteger..</text>
+</g>
+<g >
+<title>com/google/gson/JsonObject.has (3 samples, 0.01%)</title><rect x="714.2" y="309" width="0.1" height="15.0" fill="rgb(222,171,9)" rx="2" ry="2" />
+<text  x="717.16" y="319.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.normalize (10 samples, 0.05%)</title><rect x="959.5" y="213" width="0.5" height="15.0" fill="rgb(219,141,14)" rx="2" ry="2" />
+<text  x="962.50" y="223.5" ></text>
+</g>
+<g >
+<title>java/util/concurrent/ConcurrentHashMap$Traverser.advance (2 samples, 0.01%)</title><rect x="1183.5" y="325" width="0.1" height="15.0" fill="rgb(225,52,49)" rx="2" ry="2" />
+<text  x="1186.45" y="335.5" ></text>
+</g>
+<g >
+<title>SafepointMechanism::block_if_requested_slow(JavaThread*) (3 samples, 0.01%)</title><rect x="1168.9" y="117" width="0.2" height="15.0" fill="rgb(239,187,15)" rx="2" ry="2" />
+<text  x="1171.94" y="127.5" ></text>
+</g>
+<g >
+<title>java/lang/ThreadLocal.get (8 samples, 0.04%)</title><rect x="685.7" y="245" width="0.5" height="15.0" fill="rgb(221,208,35)" rx="2" ry="2" />
+<text  x="688.74" y="255.5" ></text>
+</g>
+<g >
+<title>ObjArrayKlass::allocate(int, Thread*) (2 samples, 0.01%)</title><rect x="737.2" y="149" width="0.1" height="15.0" fill="rgb(205,14,47)" rx="2" ry="2" />
+<text  x="740.18" y="159.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.stripLeadingZeroBytes (105 samples, 0.49%)</title><rect x="759.1" y="293" width="5.7" height="15.0" fill="rgb(238,51,28)" rx="2" ry="2" />
+<text  x="762.11" y="303.5" ></text>
+</g>
+<g >
+<title>zero_blocks (9 samples, 0.04%)</title><rect x="954.6" y="181" width="0.5" height="15.0" fill="rgb(222,2,18)" rx="2" ry="2" />
+<text  x="957.59" y="191.5" ></text>
+</g>
+<g >
+<title>java/lang/reflect/Constructor.newInstance (30 samples, 0.14%)</title><rect x="719.3" y="181" width="1.7" height="15.0" fill="rgb(249,171,54)" rx="2" ry="2" />
+<text  x="722.34" y="191.5" ></text>
+</g>
+<g >
+<title>ThreadHeapSampler::enabled() (2 samples, 0.01%)</title><rect x="736.4" y="101" width="0.1" height="15.0" fill="rgb(250,71,16)" rx="2" ry="2" />
+<text  x="739.42" y="111.5" ></text>
+</g>
+<g >
+<title>sun/security/jca/GetInstance.getInstance (4 samples, 0.02%)</title><rect x="721.5" y="213" width="0.2" height="15.0" fill="rgb(242,211,32)" rx="2" ry="2" />
+<text  x="724.52" y="223.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/bind/TypeAdapters$27.read (5 samples, 0.02%)</title><rect x="680.9" y="293" width="0.3" height="15.0" fill="rgb(246,28,17)" rx="2" ry="2" />
+<text  x="683.88" y="303.5" ></text>
+</g>
+<g >
+<title>java/util/concurrent/ConcurrentHashMap$BaseIterator.&lt;init&gt; (2 samples, 0.01%)</title><rect x="1183.5" y="341" width="0.1" height="15.0" fill="rgb(210,134,52)" rx="2" ry="2" />
+<text  x="1186.45" y="351.5" ></text>
+</g>
+<g >
+<title>SharedRuntime::raw_exception_handler_for_return_address(JavaThread*, unsigned char*) (2 samples, 0.01%)</title><rect x="10.1" y="581" width="0.1" height="15.0" fill="rgb(216,168,16)" rx="2" ry="2" />
+<text  x="13.11" y="591.5" ></text>
+</g>
+<g >
+<title>sun/nio/cs/UTF_8$Decoder.decodeLoop (7 samples, 0.03%)</title><rect x="691.0" y="277" width="0.4" height="15.0" fill="rgb(239,127,46)" rx="2" ry="2" />
+<text  x="693.97" y="287.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.addLower (86 samples, 0.40%)</title><rect x="955.4" y="229" width="4.6" height="15.0" fill="rgb(227,206,28)" rx="2" ry="2" />
+<text  x="958.35" y="239.5" ></text>
+</g>
+<g >
+<title>com/google/gson/stream/JsonReader.peek (6 samples, 0.03%)</title><rect x="716.1" y="293" width="0.4" height="15.0" fill="rgb(220,38,32)" rx="2" ry="2" />
+<text  x="719.12" y="303.5" ></text>
+</g>
+<g >
+<title>Monitor::IWait(Thread*, long) (17 samples, 0.08%)</title><rect x="1189.0" y="517" width="0.9" height="15.0" fill="rgb(209,155,31)" rx="2" ry="2" />
+<text  x="1192.02" y="527.5" ></text>
+</g>
+<g >
+<title>java/math/BigInteger.trustedStripLeadingZeroInts (298 samples, 1.38%)</title><rect x="938.8" y="197" width="16.3" height="15.0" fill="rgb(243,148,31)" rx="2" ry="2" />
+<text  x="941.82" y="207.5" ></text>
+</g>
+<g >
+<title>jdk/internal/reflect/GeneratedConstructorAccessor2.newInstance (2 samples, 0.01%)</title><rect x="720.7" y="149" width="0.1" height="15.0" fill="rgb(243,33,50)" rx="2" ry="2" />
+<text  x="723.65" y="159.5" ></text>
+</g>
+<g >
+<title>MemAllocator::mem_allocate(MemAllocator::Allocation&amp;) const (2 samples, 0.01%)</title><rect x="935.5" y="197" width="0.2" height="15.0" fill="rgb(241,80,27)" rx="2" ry="2" />
+<text  x="938.55" y="207.5" ></text>
+</g>
+<g >
+<title>java/security/Provider$Service.newInstance (4 samples, 0.02%)</title><rect x="721.5" y="197" width="0.2" height="15.0" fill="rgb(253,202,26)" rx="2" ry="2" />
+<text  x="724.52" y="207.5" ></text>
+</g>
+<g >
+<title>java/lang/reflect/Method.invoke (9,264 samples, 42.83%)</title><rect x="678.2" y="501" width="505.4" height="15.0" fill="rgb(246,109,26)" rx="2" ry="2" />
+<text  x="681.15" y="511.5" >java/lang/reflect/Method.invoke</text>
+</g>
+<g >
+<title>VM_Operation::evaluate() (5 samples, 0.02%)</title><rect x="1188.7" y="517" width="0.3" height="15.0" fill="rgb(234,164,33)" rx="2" ry="2" />
+<text  x="1191.75" y="527.5" ></text>
+</g>
+<g >
+<title>java/lang/String.toUpperCase (4 samples, 0.02%)</title><rect x="721.1" y="181" width="0.3" height="15.0" fill="rgb(223,82,22)" rx="2" ry="2" />
+<text  x="724.14" y="191.5" ></text>
+</g>
+<g >
+<title>java/util/concurrent/FutureTask.run (9,264 samples, 42.83%)</title><rect x="678.2" y="581" width="505.4" height="15.0" fill="rgb(213,33,33)" rx="2" ry="2" />
+<text  x="681.15" y="591.5" >java/util/concurrent/FutureTask.run</text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.find (4 samples, 0.02%)</title><rect x="680.7" y="261" width="0.2" height="15.0" fill="rgb(254,87,25)" rx="2" ry="2" />
+<text  x="683.66" y="271.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtValidator.validate (28 samples, 0.13%)</title><rect x="713.9" y="357" width="1.5" height="15.0" fill="rgb(220,116,19)" rx="2" ry="2" />
+<text  x="716.89" y="367.5" ></text>
+</g>
+<g >
+<title>zero_blocks (2 samples, 0.01%)</title><rect x="1174.5" y="181" width="0.1" height="15.0" fill="rgb(230,140,7)" rx="2" ry="2" />
+<text  x="1177.45" y="191.5" ></text>
+</g>
+<g >
+<title>com/example/tink/bm/jmh_generated/JwtPublicKeyVerifyBenchmark_verifyJwt_signedWith1stKey_jmhTest.verifyJwt_signedWith1stKey_Throughput (9,264 samples, 42.83%)</title><rect x="678.2" y="437" width="505.4" height="15.0" fill="rgb(229,77,22)" rx="2" ry="2" />
+<text  x="681.15" y="447.5" >com/example/tink/bm/jmh_generated/JwtPublicKeyVerifyBenchmark_verifyJ..</text>
+</g>
+<g >
+<title>JVM_GetCallerClass (4 samples, 0.02%)</title><rect x="720.8" y="149" width="0.2" height="15.0" fill="rgb(230,195,13)" rx="2" ry="2" />
+<text  x="723.76" y="159.5" ></text>
+</g>
+<g >
+<title>zero_blocks (2 samples, 0.01%)</title><rect x="1181.3" y="293" width="0.1" height="15.0" fill="rgb(220,2,0)" rx="2" ry="2" />
+<text  x="1184.27" y="303.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtFormat.decodeSignature (235 samples, 1.09%)</title><rect x="692.0" y="341" width="12.8" height="15.0" fill="rgb(237,68,17)" rx="2" ry="2" />
+<text  x="695.01" y="351.5" ></text>
+</g>
+<g >
+<title>montgomeryMultiply (741 samples, 3.43%)</title><rect x="15.1" y="613" width="40.5" height="15.0" fill="rgb(226,133,24)" rx="2" ry="2" />
+<text  x="18.13" y="623.5" >mon..</text>
+</g>
+<g >
+<title>CompositeElapsedCounterSource::now() (2 samples, 0.01%)</title><rect x="1185.6" y="437" width="0.1" height="15.0" fill="rgb(242,46,16)" rx="2" ry="2" />
+<text  x="1188.64" y="447.5" ></text>
+</g>
+<g >
+<title>com/google/gson/JsonPrimitive.getAsDouble (2 samples, 0.01%)</title><rect x="714.1" y="293" width="0.1" height="15.0" fill="rgb(232,161,38)" rx="2" ry="2" />
+<text  x="717.05" y="303.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/SHA2.implCompressCheck (4 samples, 0.02%)</title><rect x="731.0" y="213" width="0.2" height="15.0" fill="rgb(216,202,11)" rx="2" ry="2" />
+<text  x="733.96" y="223.5" ></text>
+</g>
+<g >
+<title>CodeCache::get_code_heap_containing(void*) (3 samples, 0.01%)</title><rect x="739.7" y="133" width="0.2" height="15.0" fill="rgb(206,119,20)" rx="2" ry="2" />
+<text  x="742.69" y="143.5" ></text>
+</g>
+<g >
+<title>__psynch_cvwait (16 samples, 0.07%)</title><rect x="1189.1" y="485" width="0.8" height="15.0" fill="rgb(216,141,20)" rx="2" ry="2" />
+<text  x="1192.07" y="495.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/LinkedTreeMap.containsKey (3 samples, 0.01%)</title><rect x="717.2" y="293" width="0.1" height="15.0" fill="rgb(227,226,11)" rx="2" ry="2" />
+<text  x="720.16" y="303.5" ></text>
+</g>
+<g >
+<title>pthread_jit_write_protect_np (4 samples, 0.02%)</title><rect x="680.3" y="325" width="0.2" height="15.0" fill="rgb(236,42,21)" rx="2" ry="2" />
+<text  x="683.28" y="335.5" ></text>
+</g>
+<g >
+<title>java/security/Provider.newInstanceUtil (3 samples, 0.01%)</title><rect x="721.5" y="181" width="0.2" height="15.0" fill="rgb(254,199,19)" rx="2" ry="2" />
+<text  x="724.52" y="191.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/ByteArrayAccess.b2iBig64 (2 samples, 0.01%)</title><rect x="722.4" y="213" width="0.1" height="15.0" fill="rgb(246,105,21)" rx="2" ry="2" />
+<text  x="725.40" y="223.5" ></text>
+</g>
+<g >
+<title>CompositeElapsedCounterSource::now() (7 samples, 0.03%)</title><rect x="1185.3" y="453" width="0.3" height="15.0" fill="rgb(254,152,14)" rx="2" ry="2" />
+<text  x="1188.25" y="463.5" ></text>
+</g>
+<g >
+<title>CodeCache::find_blob(void*) (6 samples, 0.03%)</title><rect x="739.6" y="165" width="0.4" height="15.0" fill="rgb(228,28,17)" rx="2" ry="2" />
+<text  x="742.64" y="175.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.engineReset (4 samples, 0.02%)</title><rect x="731.3" y="261" width="0.3" height="15.0" fill="rgb(248,85,31)" rx="2" ry="2" />
+<text  x="734.34" y="271.5" ></text>
+</g>
+<g >
+<title>java/security/GeneralSecurityException.&lt;init&gt; (238 samples, 1.10%)</title><rect x="731.7" y="325" width="13.0" height="15.0" fill="rgb(208,114,44)" rx="2" ry="2" />
+<text  x="734.73" y="335.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/RawJwt.fromJsonPayload (50 samples, 0.23%)</title><rect x="715.4" y="357" width="2.7" height="15.0" fill="rgb(206,105,8)" rx="2" ry="2" />
+<text  x="718.41" y="367.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/Base64.decode (64 samples, 0.30%)</title><rect x="692.9" y="277" width="3.5" height="15.0" fill="rgb(247,214,23)" rx="2" ry="2" />
+<text  x="695.88" y="287.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.engineUpdate (11 samples, 0.05%)</title><rect x="745.0" y="229" width="0.6" height="15.0" fill="rgb(228,158,38)" rx="2" ry="2" />
+<text  x="747.98" y="239.5" ></text>
+</g>
+<g >
+<title>pl/project13/scala/jmh/extras/profiler/AsyncProfiler.profilerCommand (2 samples, 0.01%)</title><rect x="1183.6" y="485" width="0.1" height="15.0" fill="rgb(212,140,18)" rx="2" ry="2" />
+<text  x="1186.56" y="495.5" ></text>
+</g>
+<g >
+<title>G1RemSet::scan_rem_set(G1ParScanThreadState*, unsigned int) (14 samples, 0.06%)</title><rect x="1185.3" y="517" width="0.7" height="15.0" fill="rgb(214,75,22)" rx="2" ry="2" />
+<text  x="1188.25" y="527.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/subtle/RsaSsaPssVerifyJce.verify (8,493 samples, 39.27%)</title><rect x="718.1" y="357" width="463.4" height="15.0" fill="rgb(212,214,53)" rx="2" ry="2" />
+<text  x="721.14" y="367.5" >com/google/crypto/tink/subtle/RsaSsaPssVerifyJce.verify</text>
+</g>
+<g >
+<title>com/google/gson/JsonObject.get (3 samples, 0.01%)</title><rect x="713.6" y="325" width="0.2" height="15.0" fill="rgb(205,129,12)" rx="2" ry="2" />
+<text  x="716.61" y="335.5" ></text>
+</g>
+<g >
+<title>com/google/gson/internal/bind/TypeAdapters$27.read (12 samples, 0.06%)</title><rect x="715.5" y="277" width="0.6" height="15.0" fill="rgb(208,179,28)" rx="2" ry="2" />
+<text  x="718.47" y="287.5" ></text>
+</g>
+<g >
+<title>os::PlatformEvent::park() (3 samples, 0.01%)</title><rect x="1168.9" y="53" width="0.2" height="15.0" fill="rgb(253,229,27)" rx="2" ry="2" />
+<text  x="1171.94" y="63.5" ></text>
+</g>
+<g >
+<title>java/nio/charset/CharsetDecoder.decode (7 samples, 0.03%)</title><rect x="691.0" y="309" width="0.4" height="15.0" fill="rgb(223,1,50)" rx="2" ry="2" />
+<text  x="693.97" y="319.5" ></text>
+</g>
+<g >
+<title>OptoRuntime::rethrow_C(oopDesc*, JavaThread*, unsigned char*) (2 samples, 0.01%)</title><rect x="10.1" y="597" width="0.1" height="15.0" fill="rgb(250,4,1)" rx="2" ry="2" />
+<text  x="13.11" y="607.5" ></text>
+</g>
+<g >
+<title>java/util/concurrent/ConcurrentHashMap$Traverser.advance (35 samples, 0.16%)</title><rect x="1181.5" y="357" width="2.0" height="15.0" fill="rgb(239,145,6)" rx="2" ry="2" />
+<text  x="1184.54" y="367.5" ></text>
+</g>
+<g >
+<title>org/openjdk/jmh/runner/BenchmarkHandler$BenchmarkTask.call (9,264 samples, 42.83%)</title><rect x="678.2" y="533" width="505.4" height="15.0" fill="rgb(244,103,48)" rx="2" ry="2" />
+<text  x="681.15" y="543.5" >org/openjdk/jmh/runner/BenchmarkHandler$BenchmarkTask.call</text>
+</g>
+<g >
+<title>java/math/BigInteger.toByteArray (74 samples, 0.34%)</title><rect x="764.9" y="325" width="4.0" height="15.0" fill="rgb(211,180,9)" rx="2" ry="2" />
+<text  x="767.90" y="335.5" ></text>
+</g>
+<g >
+<title>java/nio/charset/CharsetDecoder.&lt;init&gt; (3 samples, 0.01%)</title><rect x="685.4" y="277" width="0.2" height="15.0" fill="rgb(237,149,4)" rx="2" ry="2" />
+<text  x="688.41" y="287.5" ></text>
+</g>
+<g >
+<title>java/nio/ByteBuffer.&lt;init&gt; (2 samples, 0.01%)</title><rect x="679.2" y="325" width="0.1" height="15.0" fill="rgb(224,81,0)" rx="2" ry="2" />
+<text  x="682.19" y="335.5" ></text>
+</g>
+<g >
+<title>sun/nio/cs/UTF_8$Decoder.decodeArrayLoop (10 samples, 0.05%)</title><rect x="684.9" y="261" width="0.5" height="15.0" fill="rgb(209,11,21)" rx="2" ry="2" />
+<text  x="687.86" y="271.5" ></text>
+</g>
+<g >
+<title>java/util/concurrent/Executors$RunnableAdapter.call (9,264 samples, 42.83%)</title><rect x="678.2" y="565" width="505.4" height="15.0" fill="rgb(220,35,24)" rx="2" ry="2" />
+<text  x="681.15" y="575.5" >java/util/concurrent/Executors$RunnableAdapter.call</text>
+</g>
+<g >
+<title>CollectedHeap::array_allocate(Klass*, int, int, bool, Thread*) (2 samples, 0.01%)</title><rect x="935.5" y="229" width="0.2" height="15.0" fill="rgb(210,147,41)" rx="2" ry="2" />
+<text  x="938.55" y="239.5" ></text>
+</g>
+<g >
+<title>com/google/gson/JsonObject.add (2 samples, 0.01%)</title><rect x="715.5" y="261" width="0.1" height="15.0" fill="rgb(253,196,18)" rx="2" ry="2" />
+<text  x="718.52" y="271.5" ></text>
+</g>
+<g >
+<title>java/lang/String.compareTo (3 samples, 0.01%)</title><rect x="717.4" y="229" width="0.2" height="15.0" fill="rgb(253,211,51)" rx="2" ry="2" />
+<text  x="720.43" y="239.5" ></text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.toIntArray (7 samples, 0.03%)</title><rect x="1181.0" y="309" width="0.4" height="15.0" fill="rgb(254,12,36)" rx="2" ry="2" />
+<text  x="1184.00" y="319.5" ></text>
+</g>
+<g >
+<title>Method::bci_from(unsigned char*) const (2 samples, 0.01%)</title><rect x="733.1" y="197" width="0.1" height="15.0" fill="rgb(208,181,53)" rx="2" ry="2" />
+<text  x="736.09" y="207.5" ></text>
+</g>
+<g >
+<title>thread_start (116 samples, 0.54%)</title><rect x="1183.7" y="629" width="6.3" height="15.0" fill="rgb(227,211,33)" rx="2" ry="2" />
+<text  x="1186.67" y="639.5" ></text>
+</g>
+<g >
+<title>sun/security/provider/DigestBase.engineUpdate (9 samples, 0.04%)</title><rect x="731.2" y="277" width="0.5" height="15.0" fill="rgb(243,210,23)" rx="2" ry="2" />
+<text  x="734.24" y="287.5" ></text>
+</g>
+<g >
+<title>ThreadSafepointState::handle_polling_page_exception() (5 samples, 0.02%)</title><rect x="770.6" y="293" width="0.2" height="15.0" fill="rgb(220,76,35)" rx="2" ry="2" />
+<text  x="773.57" y="303.5" ></text>
+</g>
+<g >
+<title>os::elapsed_counter() (7 samples, 0.03%)</title><rect x="1185.3" y="437" width="0.3" height="15.0" fill="rgb(227,68,21)" rx="2" ry="2" />
+<text  x="1188.25" y="447.5" ></text>
+</g>
+<g >
+<title>Monitor::wait(bool, long, bool) (17 samples, 0.08%)</title><rect x="1189.0" y="533" width="0.9" height="15.0" fill="rgb(225,189,48)" rx="2" ry="2" />
+<text  x="1192.02" y="543.5" ></text>
+</g>
+<g >
+<title>com/google/crypto/tink/jwt/JwtPublicKeyVerifyWrapper$WrappedJwtPublicKeyVerify.verifyAndDecode (3 samples, 0.01%)</title><rect x="678.2" y="405" width="0.1" height="15.0" fill="rgb(218,4,48)" rx="2" ry="2" />
+<text  x="681.15" y="415.5" ></text>
+</g>
+<g >
+<title>pthread_jit_write_protect_np (3 samples, 0.01%)</title><rect x="720.8" y="133" width="0.2" height="15.0" fill="rgb(235,34,47)" rx="2" ry="2" />
+<text  x="723.82" y="143.5" ></text>
+</g>
+<g >
+<title>os::PlatformEvent::park() (4 samples, 0.02%)</title><rect x="773.3" y="197" width="0.2" height="15.0" fill="rgb(226,72,49)" rx="2" ry="2" />
+<text  x="776.30" y="207.5" ></text>
+</g>
+<g >
+<title>java/util/concurrent/ThreadPoolExecutor.runWorker (9,264 samples, 42.83%)</title><rect x="678.2" y="597" width="505.4" height="15.0" fill="rgb(252,157,35)" rx="2" ry="2" />
+<text  x="681.15" y="607.5" >java/util/concurrent/ThreadPoolExecutor.runWorker</text>
+</g>
+<g >
+<title>java/math/MutableBigInteger.primitiveRightShift (4 samples, 0.02%)</title><rect x="1174.6" y="197" width="0.2" height="15.0" fill="rgb(238,118,42)" rx="2" ry="2" />
+<text  x="1177.56" y="207.5" ></text>
+</g>
+<g >
+<title>frame::sender_for_interpreter_frame(RegisterMap*) const (2 samples, 0.01%)</title><rect x="733.4" y="197" width="0.1" height="15.0" fill="rgb(232,40,45)" rx="2" ry="2" />
+<text  x="736.42" y="207.5" ></text>
+</g>
+<g >
+<title>Compile::Code_Gen() (7 samples, 0.03%)</title><rect x="1187.4" y="469" width="0.4" height="15.0" fill="rgb(229,98,2)" rx="2" ry="2" />
+<text  x="1190.38" y="479.5" ></text>
+</g>
+<g >
+<title>java/io/StringReader.&lt;init&gt; (4 samples, 0.02%)</title><rect x="681.6" y="341" width="0.3" height="15.0" fill="rgb(211,58,30)" rx="2" ry="2" />
+<text  x="684.64" y="351.5" ></text>
+</g>
+</g>
+</svg>
