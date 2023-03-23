@@ -30,7 +30,6 @@ import com.google.crypto.tink.aead.AeadConfig;
 @Threads(8)
 @Warmup(iterations = 1)
 @Measurement(iterations = 1)
-@State(Scope.Benchmark)
 public class AesGcmSivBenchmark {
     @Benchmark
     public void conscrypt_encrypt(ConscryptProviderState state, Blackhole bh) throws GeneralSecurityException {
